@@ -282,20 +282,6 @@ fn load_building_type_file(
     Ok(stats)
 }
 
-/// Retire user reports whose records changed across a re-import.
-///
-/// **This is the only thing that catches that case.** A refresh detects change
-/// via `update::diff`, and `update::dataset::refresh` retires reports inside
-/// its apply transaction on the strength of it. An `import` has no diff at all
-/// — it rebuilds the table wholesale — so without this call a report submitted
-/// before a re-import would keep vetoing its object forever, even though the
-/// record it described was replaced. The content signature is what makes this
-/// possible without a second copy of the old data to compare against.
-///
-/// Best-effort: a reconcile failure must not fail an otherwise-successful
-/// import, because the import's own work has already landed and the standing
-/// safety nets (`reports reconcile`, the background job) re-cover it. Warn
-/// rather than propagate, the same call `package::log_export` makes.
 /// `metadata` key holding when `import <source>` last finished successfully,
 /// as `now()::VARCHAR` (read back with `TRY_CAST(value AS TIMESTAMPTZ)`).
 ///
@@ -331,6 +317,20 @@ pub(crate) fn record_imported_at(conn: &Connection, spec: &crate::dataset::Datas
     }
 }
 
+/// Retire user reports whose records changed across a re-import.
+///
+/// **This is the only thing that catches that case.** A refresh detects change
+/// via `update::diff`, and `update::dataset::refresh` retires reports inside
+/// its apply transaction on the strength of it. An `import` has no diff at all
+/// — it rebuilds the table wholesale — so without this call a report submitted
+/// before a re-import would keep vetoing its object forever, even though the
+/// record it described was replaced. The content signature is what makes this
+/// possible without a second copy of the old data to compare against.
+///
+/// Best-effort: a reconcile failure must not fail an otherwise-successful
+/// import, because the import's own work has already landed and the standing
+/// safety nets (`reports reconcile`, the background job) re-cover it. Warn
+/// rather than propagate, the same call `package::log_export` makes.
 fn reconcile_reports(conn: &Connection, spec: &crate::dataset::DatasetSpec) {
     match crate::reports::reconcile_source(conn, spec) {
         Ok(stats) if stats.total_expired() > 0 => info!(
