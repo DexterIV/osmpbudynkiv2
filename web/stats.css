@@ -1,0 +1,229 @@
+/* Statistics page (stats.html). Loaded after style.css, whose tokens it
+   uses; everything below is scoped to this page. */
+
+html,
+body.stats-page {
+  height: auto;
+  min-height: 100%;
+  background: var(--paper);
+}
+
+.stats {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+.stats-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stats-header h1 {
+  margin: 8px 0 4px;
+  font-size: 22px;
+}
+
+.stats-back {
+  color: var(--accent-soft);
+  font-size: 13px;
+}
+.stats-back:hover,
+.stats-back:focus-visible {
+  color: var(--accent);
+}
+
+.stats h2 {
+  margin: 32px 0 8px;
+  padding-bottom: 4px;
+  font-size: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.stats h3 {
+  margin: 20px 0 6px;
+  font-size: 13px;
+}
+
+.stats-muted {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.stats-error {
+  margin: 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  font-size: 13px;
+}
+
+/* Tables scroll sideways inside their wrapper at phone width instead of
+   widening the page. `position: relative` makes the wrapper the containing
+   block of the absolutely positioned .visually-hidden header label ("Pokaż na
+   mapie"); without it that label escapes the scroll box and widens the page
+   by the table's overflow. */
+.stats-table-wrap {
+  position: relative;
+  overflow-x: auto;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--paper-raised);
+  font-size: 13px;
+}
+.stats-table caption {
+  padding: 0 0 4px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+}
+.stats-table th,
+.stats-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+.stats-table thead th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  border-bottom-color: var(--line-strong);
+}
+.stats-table tbody th {
+  font-weight: normal;
+  /* Row labels wrap so a long one cannot push the number column out of a
+     narrow table's scroll box. */
+  white-space: normal;
+}
+.stats-table .num {
+  text-align: right;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+.stats-table thead .num {
+  font-family: var(--font-label);
+}
+.stats-table tr.total th,
+.stats-table tr.total td {
+  font-weight: 600;
+  border-top: 1px solid var(--line-strong);
+}
+
+/* TERYT codes (SIMC, TERC) in the ranking. */
+.stats-table .code {
+  font-family: var(--font-data);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* Secondary line under a name: the gmina type, or the settlement's gmina
+   code. */
+.stats-sub {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+/* The unmatched share as a thin bar behind the percentage. */
+.stats-ratio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.stats-bar {
+  display: inline-block;
+  width: 60px;
+  height: 6px;
+  background: var(--line);
+}
+.stats-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--danger);
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.stats-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0 12px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.stats-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* Explicit size rather than the browser's automatic one, which is measured
+   per browser and per font: the automatic width came out too tight for
+   "miejscowości" / "liczby brakujących" next to the arrow, and the automatic
+   height clipped descenders ("gminy") where the system font runs taller than
+   the one it was sized for. 14em fits the longest option with the arrow. The
+   2.5em height (border-box) is what fixes the clipping -- Chromium keeps a
+   select's line-height at `normal` whatever this rule says; the 1.4 is for
+   browsers that honour it -- and the control centres its text in it. */
+.stats-controls select {
+  /* `font` first: the shorthand resets line-height. */
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 14em;
+  height: 2.5em;
+  padding: 0 8px;
+  color: var(--ink);
+  background: var(--paper-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+}
+
+.stats-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.stats-pager .masthead-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* "Mapa" link at the end of each ranking row. */
+.stats-map-link {
+  color: var(--accent-soft);
+  font-size: 12px;
+}
+.stats-map-link:hover,
+.stats-map-link:focus-visible {
+  color: var(--accent);
+}
+
+/* At phone width the name columns wrap, so the ranking's numbers fit on
+   screen without a sideways scroll. */
+@media (max-width: 640px) {
+  .stats-table td:not(.num) {
+    white-space: normal;
+  }
+  .stats-table th,
+  .stats-table td {
+    padding: 5px 4px;
+    font-size: 12px;
+  }
+  .stats-bar {
+    display: none;
+  }
+}

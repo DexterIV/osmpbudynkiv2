@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Same theme resolution as index.html's <head> script (stored choice >
+       system setting), inline and ahead of the stylesheets for the same
+       no-flash reason. The key and the rule must agree with
+       THEME_STORAGE_KEY / storedTheme in app.js and stats.js, so a choice
+       made on either page holds on both. -->
+  <script>
+    (function () {
+      var theme = null;
+      try {
+        theme = localStorage.getItem("osmpbudynkiv2.theme");
+      } catch (e) {
+        /* Storage blocked: fall back to the system setting. */
+      }
+      if (theme !== "light" && theme !== "dark") {
+        theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+  <title>Statystyki – osmpbudynkiv2</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="icon" href="favicon-16.png" type="image/png" sizes="16x16" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <!-- style.css for the colour and font tokens; everything this page lays
+       out lives in stats.css. -->
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="stats.css" />
+  <script src="stats.js" defer></script>
+</head>
+<body class="stats-page">
+  <main class="stats">
+    <header class="stats-header">
+      <a id="back-link" class="stats-back" href="./">← Mapa</a>
+      <div class="stats-title-row">
+        <h1>Statystyki</h1>
+        <!-- Same control as index.html's #theme-toggle; see the comment there. -->
+        <button id="theme-toggle" type="button" class="theme-toggle" aria-pressed="false" aria-label="Tryb ciemny">
+          <svg class="theme-icon theme-icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+          </svg>
+          <svg class="theme-icon theme-icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/>
+            <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <p id="computed-at" class="stats-muted" aria-live="polite">Wczytywanie…</p>
+    </header>
+
+    <p id="stats-error" class="stats-error" role="alert" hidden></p>
+
+    <section aria-labelledby="h-state">
+      <h2 id="h-state">Stan danych</h2>
+      <div class="stats-table-wrap">
+        <table class="stats-table">
+          <thead>
+            <tr><th scope="col">Zbiór</th><th scope="col">Ostatnie wczytanie</th><th scope="col">Sposób</th></tr>
+          </thead>
+          <tbody id="freshness-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-registers">
+      <h2 id="h-registers">Rejestry publiczne</h2>
+      <p class="stats-muted">
+        Porównywane: obiekty biorące udział w porównaniu z OSM (w BDOT10k tylko
+        budynki eksploatowane). Brakuje w OSM: obiekty proponowane do dodania.
+      </p>
+      <div class="stats-table-wrap">
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th scope="col">Zbiór</th>
+              <th scope="col" class="num">Porównywane</th>
+              <th scope="col" class="num">Brakuje w OSM</th>
+              <th scope="col" class="num">% brakujących</th>
+            </tr>
+          </thead>
+          <tbody id="datasets-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-reports">
+      <h2 id="h-reports">Zgłoszenia</h2>
+      <div class="stats-table-wrap">
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th scope="col">Zbiór</th>
+              <th scope="col" class="num">Aktywne</th>
+              <th scope="col" class="num">Wycofane</th>
+              <th scope="col" class="num">Wygasłe</th>
+              <th scope="col" class="num">Razem</th>
+            </tr>
+          </thead>
+          <tbody id="reports-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-osm">
+      <h2 id="h-osm">OpenStreetMap</h2>
+      <div class="stats-grid">
+        <div class="stats-table-wrap">
+          <table class="stats-table">
+            <caption>Adresy</caption>
+            <tbody id="osm-addresses-body"></tbody>
+          </table>
+        </div>
+        <div class="stats-table-wrap">
+          <table class="stats-table">
+            <caption>Budynki</caption>
+            <tbody id="osm-buildings-body"></tbody>
+          </table>
+        </div>
+        <div class="stats-table-wrap">
+          <table class="stats-table">
+            <caption>Najczęstsze wartości <code>building</code></caption>
+            <tbody id="osm-values-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-areas">
+      <h2 id="h-areas">Brakujące adresy według obszaru</h2>
+      <form id="areas-controls" class="stats-controls">
+        <label>Poziom
+          <select name="level">
+            <option value="gmina">gminy</option>
+            <option value="settlement">miejscowości</option>
+          </select>
+        </label>
+        <label>Sortuj według
+          <select name="sort">
+            <option value="ratio">% brakujących</option>
+            <option value="unmatched">liczby brakujących</option>
+          </select>
+        </label>
+        <label>Kolejność
+          <select name="order">
+            <option value="desc">malejąco</option>
+            <option value="asc">rosnąco</option>
+          </select>
+        </label>
+      </form>
+      <div class="stats-table-wrap">
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th scope="col" class="num">#</th>
+              <th scope="col" id="areas-name-col">Gmina</th>
+              <th scope="col" id="areas-code-col">TERC</th>
+              <th scope="col" id="areas-gmina-col" hidden>Gmina</th>
+              <th scope="col" id="areas-gmina-code-col" hidden>TERC gminy</th>
+              <th scope="col" class="num">Adresy</th>
+              <th scope="col" class="num">Brakuje</th>
+              <th scope="col" class="num">%</th>
+              <th scope="col"><span class="visually-hidden">Pokaż na mapie</span></th>
+            </tr>
+          </thead>
+          <tbody id="areas-body"></tbody>
+        </table>
+      </div>
+      <nav class="stats-pager" aria-label="Strony rankingu">
+        <button id="prev-page" type="button" class="masthead-btn masthead-btn-secondary">‹ Poprzednia</button>
+        <span id="page-info" aria-live="polite"></span>
+        <button id="next-page" type="button" class="masthead-btn masthead-btn-secondary">Następna ›</button>
+      </nav>
+    </section>
+  </main>
+</body>
+</html>

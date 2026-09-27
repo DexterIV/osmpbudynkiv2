@@ -415,6 +415,24 @@ body {
   background: var(--paper);
   color: var(--accent-soft);
 }
+/* "Statystyki" is a link wearing the button recipe. `.masthead a` (0,1,1)
+   outranks the single-class rules above, so without these it would come out
+   underlined and in the link colour. */
+.masthead a.masthead-btn {
+  display: inline-block;
+  text-decoration: none;
+  line-height: normal;
+  /* What the global `button` rule gives its siblings. */
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.masthead a.masthead-btn-secondary {
+  color: var(--accent);
+}
+.masthead a.masthead-btn-secondary:hover,
+.masthead a.masthead-btn-secondary:focus-visible {
+  color: var(--accent-soft);
+}
 /* "Something here is not the default" marker on #display-options-btn. On the
    corner rather than inline so the label does not shift when it appears, and
    ringed in the masthead's own background so it stays a distinct dot where

@@ -1643,8 +1643,10 @@ media query: an inline script in `index.html`'s `<head>` resolves stored choice
 `#theme-toggle` flips it. A dark-only CSS rule written against the media query
 instead would ignore an explicit light choice. `unavailable.html` carries its
 own copy of the script and tokens, since the proxy serves it when nothing else
-is reachable. The six tokens the dark block redefines are `let`, filled by
-`readThemeColors`; on a switch, `applyThemeToMap` pushes them into every paint
-property that used one. **A new paint use of a theme-dependent token needs a
-line there** — a missed one keeps the previous theme's colour until a reload,
-and nothing errors.
+is reachable; `stats.html` carries a copy of the script and `stats.js` its own
+toggle (the map-free half of app.js's), so a change to the storage key or the
+store rule has three homes. The six tokens the dark block redefines are `let`,
+filled by `readThemeColors`; on a switch, `applyThemeToMap` pushes them into
+every paint property that used one. **A new paint use of a theme-dependent
+token needs a line there** — a missed one keeps the previous theme's colour
+until a reload, and nothing errors.
