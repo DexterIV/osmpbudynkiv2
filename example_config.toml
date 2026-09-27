@@ -445,6 +445,9 @@ tile_max_age_seconds = 60
 agg_tile_max_age_seconds = 300
 # max-age for GET /updates.
 updates_max_age_seconds = 60
+# max-age for GET /stats and /stats/areas. Both are queried per request
+# (~0.1 s each on the Poland database), so this is their only caching.
+stats_max_age_seconds = 300
 # max-age for static frontend assets under web_dir/vendor/ (e.g. the
 # MapLibre GL JS bundle) -- versioned by path but not content-hashed, so it
 # gets a cautious week rather than the immutable treatment fonts get below.

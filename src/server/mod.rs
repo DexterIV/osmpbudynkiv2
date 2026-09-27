@@ -3,6 +3,7 @@ pub mod jobs;
 mod josm_plugins;
 mod package;
 mod reports;
+mod stats;
 mod tile_cache;
 pub mod tile_dirty;
 pub mod tile_store;
@@ -552,6 +553,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(package::get_package).post(package::post_package),
         )
         .route("/updates", axum::routing::get(updates::get_updates))
+        // The statistics page's data. The page itself is `web/stats.html`,
+        // served by the static fallback below -- a different path.
+        .route("/stats", axum::routing::get(stats::get_stats))
+        .route("/stats/areas", axum::routing::get(stats::get_areas))
         .route(
             "/josm_plugins/v2/nearest_building",
             axum::routing::get(josm_plugins::get_nearest_building),

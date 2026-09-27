@@ -148,7 +148,7 @@ fn build_updates(state: &AppState, minutes: u64) -> anyhow::Result<String> {
     Ok(serde_json::to_string(&collection)?)
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response {
+pub(super) fn error_response(status: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({ "error": message }).to_string();
     (
         status,

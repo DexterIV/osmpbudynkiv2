@@ -77,6 +77,16 @@ fn spec(source: &str) -> Result<TotalsSpec> {
     })
 }
 
+/// `SELECT count(*)` over every comparable object of `source` nationally --
+/// the row set `cell_totals` sums to, counted straight from the source table.
+/// Built from the same `spec` so the statistics page (`server::stats`) cannot
+/// apply a different filter than the ratio grid.
+pub fn comparable_count_sql(source: &str) -> Result<String> {
+    let s = spec(source)?;
+    let filter = s.filter.unwrap_or("TRUE");
+    Ok(format!("SELECT count(*) FROM {} b WHERE {filter}", s.table))
+}
+
 /// Rebuild every cell's total for one source. Assumes an open transaction;
 /// called from inside the full compare's, so the totals and the unmatched rows
 /// they describe commit together or not at all.

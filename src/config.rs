@@ -471,6 +471,9 @@ pub struct CacheConfig {
     /// `/updates` response max-age. Matches the endpoint's pre-Phase-2
     /// hardcoded value (60s) -- see `server::updates`.
     pub updates_max_age_seconds: u64,
+    /// `/stats` and `/stats/areas` response max-age. Both are queried per
+    /// request (see `server::stats`), so this is their only caching.
+    pub stats_max_age_seconds: u64,
     /// max-age for static frontend assets under `web_dir/vendor/` (e.g. the
     /// MapLibre GL JS bundle) -- versioned by path but not content-hashed, so
     /// it gets a cautious week rather than the `immutable` treatment fonts get.
@@ -505,6 +508,7 @@ impl Default for CacheConfig {
             tile_max_age_seconds: 60,
             agg_tile_max_age_seconds: 300,
             updates_max_age_seconds: 60,
+            stats_max_age_seconds: 300,
             static_max_age_seconds: 604_800,
             font_max_age_seconds: 31_536_000,
             tile_cache_max_bytes: 67_108_864,
@@ -1260,6 +1264,7 @@ street_mappings = "https://example.test/m.csv"
         assert_eq!(config.cache.tile_max_age_seconds, 60);
         assert_eq!(config.cache.agg_tile_max_age_seconds, 300);
         assert_eq!(config.cache.updates_max_age_seconds, 60);
+        assert_eq!(config.cache.stats_max_age_seconds, 300);
         assert_eq!(config.cache.static_max_age_seconds, 604_800);
         assert_eq!(config.cache.font_max_age_seconds, 31_536_000);
         assert_eq!(config.cache.tile_cache_max_bytes, 67_108_864);
@@ -1283,6 +1288,7 @@ tile_max_age_seconds = 30
         // Unset fields still fall back to their defaults.
         assert_eq!(config.cache.agg_tile_max_age_seconds, 300);
         assert_eq!(config.cache.updates_max_age_seconds, 60);
+        assert_eq!(config.cache.stats_max_age_seconds, 300);
         assert_eq!(config.cache.static_max_age_seconds, 604_800);
         assert_eq!(config.cache.font_max_age_seconds, 31_536_000);
         assert_eq!(config.cache.tile_cache_max_bytes, 67_108_864);

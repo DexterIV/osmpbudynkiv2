@@ -17,6 +17,8 @@
 //! | `/tiles` out-of-range zoom (204) | `public, max-age=`[`OUT_OF_RANGE_ZOOM_MAX_AGE_SECONDS`] | none | none |
 //! | `/tiles` 500 | none set here -> falls through to the API default `no-store` | none | none |
 //! | `/updates` | `public, max-age=<updates_max_age_seconds>` | none | none |
+//! | `/stats`, `/stats/areas` | `public, max-age=<stats_max_age_seconds>` | none | none |
+//! | `/stats/areas` 400, `/stats*` 500 | none set here -> `no-store` | none | none |
 //! | `web_dir/fonts/**` | `public, max-age=<font_max_age_seconds>, immutable` | none | none |
 //! | `web_dir/vendor/**` | `public, max-age=<static_max_age_seconds>` | none | none |
 //! | any other file `web_dir` actually served (`index.html`, `app.js`, `style.css`, favicons) | `no-cache` | none | none |
@@ -93,6 +95,7 @@ pub struct CacheHeaders {
     pub agg_tile: HeaderValue,
     pub out_of_range_zoom: HeaderValue,
     pub updates: HeaderValue,
+    pub stats: HeaderValue,
     pub vendor: HeaderValue,
     pub font: HeaderValue,
 }
@@ -104,6 +107,7 @@ impl CacheHeaders {
             agg_tile: public_max_age(cache.agg_tile_max_age_seconds),
             out_of_range_zoom: public_max_age(OUT_OF_RANGE_ZOOM_MAX_AGE_SECONDS),
             updates: public_max_age(cache.updates_max_age_seconds),
+            stats: public_max_age(cache.stats_max_age_seconds),
             vendor: public_max_age(cache.static_max_age_seconds),
             font: public_max_age_immutable(cache.font_max_age_seconds),
         }
@@ -316,6 +320,7 @@ mod tests {
             tile_max_age_seconds: 60,
             agg_tile_max_age_seconds: 300,
             updates_max_age_seconds: 60,
+            stats_max_age_seconds: 300,
             static_max_age_seconds: 604_800,
             font_max_age_seconds: 31_536_000,
             tile_cache_max_bytes: 268_435_456,
@@ -326,6 +331,7 @@ mod tests {
         assert_eq!(headers.agg_tile, "public, max-age=300");
         assert_eq!(headers.out_of_range_zoom, "public, max-age=86400");
         assert_eq!(headers.updates, "public, max-age=60");
+        assert_eq!(headers.stats, "public, max-age=300");
         assert_eq!(headers.vendor, "public, max-age=604800");
         assert_eq!(headers.font, "public, max-age=31536000, immutable");
     }
