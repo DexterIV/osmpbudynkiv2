@@ -296,6 +296,41 @@ fn load_building_type_file(
 /// import, because the import's own work has already landed and the standing
 /// safety nets (`reports reconcile`, the background job) re-cover it. Warn
 /// rather than propagate, the same call `package::log_export` makes.
+/// `metadata` key holding when `import <source>` last finished successfully,
+/// as `now()::VARCHAR` (read back with `TRY_CAST(value AS TIMESTAMPTZ)`).
+///
+/// Imports need their own stamp because they leave no other durable one:
+/// `dataset_refreshes` is written only by `update` (its readers assume every
+/// row is a diff), and `job_run_log` keeps only the latest run -- a failed
+/// import erases the last successful one, and `import prg` writes no row at
+/// all. "Last successful load" of a source is therefore the later of this and
+/// `max(dataset_refreshes.finished_at)`.
+pub fn imported_at_key(source: &str) -> String {
+    format!("imported_at:{source}")
+}
+
+/// Stamp `imported_at_key(spec.name)` with the current time. Called by each
+/// government loader as its last step, so only a fully successful import
+/// (table loaded *and* indexed) is stamped.
+///
+/// Best-effort, for the same reason as `reconcile_reports` below: the import
+/// has already landed, and failing it over a freshness stamp would make the
+/// operator redo tens of minutes of work for a cosmetic value.
+pub(crate) fn record_imported_at(conn: &Connection, spec: &crate::dataset::DatasetSpec) {
+    let key = imported_at_key(spec.name);
+    let outcome = crate::compare::in_transaction(conn, "record import time", || {
+        conn.execute("DELETE FROM metadata WHERE key = ?", duckdb::params![key])?;
+        conn.execute(
+            "INSERT INTO metadata (key, value) VALUES (?, now()::VARCHAR)",
+            duckdb::params![key],
+        )?;
+        Ok(())
+    });
+    if let Err(e) = outcome {
+        warn!(source = spec.name, error = %e, "could not record the import time");
+    }
+}
+
 fn reconcile_reports(conn: &Connection, spec: &crate::dataset::DatasetSpec) {
     match crate::reports::reconcile_source(conn, spec) {
         Ok(stats) if stats.total_expired() > 0 => info!(
@@ -310,5 +345,42 @@ fn reconcile_reports(conn: &Connection, spec: &crate::dataset::DatasetSpec) {
             error = %e,
             "could not reconcile user reports after import; run `reports reconcile`"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let init = vec!["INSTALL spatial".to_string(), "LOAD spatial".to_string()];
+        crate::db::init_db(std::path::Path::new(":memory:"), &init, None).unwrap()
+    }
+
+    fn stamps(conn: &Connection, source: &str) -> Vec<Option<String>> {
+        let mut stmt = conn
+            .prepare("SELECT TRY_CAST(value AS TIMESTAMPTZ)::VARCHAR FROM metadata WHERE key = ?")
+            .unwrap();
+        stmt.query_map(duckdb::params![imported_at_key(source)], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// `metadata` has no key constraint, so the stamp relies on its own
+    /// delete-then-insert to stay a single row -- and readers cast it back to
+    /// a timestamp, so it must parse as one.
+    #[test]
+    fn a_repeated_import_leaves_one_parseable_stamp_per_source() {
+        let conn = conn();
+        record_imported_at(&conn, &crate::dataset::PRG);
+        record_imported_at(&conn, &crate::dataset::PRG);
+        record_imported_at(&conn, &crate::dataset::EGIB);
+
+        let prg = stamps(&conn, "prg");
+        assert_eq!(prg.len(), 1);
+        assert!(prg[0].is_some(), "stamp must parse as TIMESTAMPTZ");
+        assert_eq!(stamps(&conn, "egib").len(), 1);
+        assert!(stamps(&conn, "bdot10k").is_empty());
     }
 }

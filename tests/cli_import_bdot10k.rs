@@ -129,6 +129,18 @@ fn test_import_bdot10k_persists_expected_row_count() {
         })
         .unwrap();
     assert_eq!(total, 74);
+
+    // A successful import stamps its time, since it writes no
+    // `dataset_refreshes` row -- see `import::imported_at_key`.
+    let stamped: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM metadata
+             WHERE key = 'imported_at:bdot10k' AND TRY_CAST(value AS TIMESTAMPTZ) IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stamped, 1);
 }
 
 /// An import rewrites `bdot10k_buildings` wholesale, so every tile in the

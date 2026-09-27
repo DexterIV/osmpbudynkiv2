@@ -158,6 +158,7 @@ pub fn import(conn: &Connection, config: &Config, file: Option<&Path>, url: &str
 
     match &outcome {
         Ok(stats) => {
+            super::record_imported_at(conn, &crate::dataset::EGIB);
             let _ = crate::job_log::record(conn, "import:egib", "Success", Some(&summarize(stats)));
         }
         Err(e) => {

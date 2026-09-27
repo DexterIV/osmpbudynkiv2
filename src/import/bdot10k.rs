@@ -191,6 +191,7 @@ pub fn import(conn: &Connection, config: &Config, file: Option<&Path>, url: &str
 
     match &outcome {
         Ok(stats) => {
+            super::record_imported_at(conn, &crate::dataset::BDOT10K);
             let _ =
                 crate::job_log::record(conn, "import:bdot10k", "Success", Some(&summarize(stats)));
         }

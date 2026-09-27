@@ -94,6 +94,18 @@ fn test_import_prg_from_fixture() {
             .collect()
     };
     assert_eq!(housenumbers, vec!["1A", "21A", "2A"]);
+
+    // A successful import stamps its time, since it writes no
+    // `dataset_refreshes` row -- see `import::imported_at_key`.
+    let stamped: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM metadata
+             WHERE key = 'imported_at:prg' AND TRY_CAST(value AS TIMESTAMPTZ) IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stamped, 1);
 }
 
 // `test_import_prg_writes_row_hash` used to live here, asserting a non-NULL

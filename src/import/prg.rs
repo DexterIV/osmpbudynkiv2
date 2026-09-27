@@ -83,6 +83,7 @@ pub fn import(
         "PRG import complete"
     );
 
+    super::record_imported_at(conn, &crate::dataset::PRG);
     Ok(())
 }
 
