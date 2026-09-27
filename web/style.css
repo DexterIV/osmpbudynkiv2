@@ -1543,6 +1543,100 @@ button {
   line-height: 22px;
 }
 
+/* BasemapControl (app.js): a layers button plus the menu it opens.
+   Fixed colours rather than theme tokens throughout, like the stock
+   zoom/compass buttons it sits under, which stay dark-on-white in both
+   themes -- a dark menu hanging off a white button column would read as a
+   different widget. MapLibre's .maplibregl-ctrl-group button rule supplies
+   the button's 29px box and hover; this centres the SVG, and tints the
+   button while its menu is open. */
+.basemap-ctrl {
+  position: relative;
+}
+.maplibregl-ctrl-group .basemap-ctrl-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #333;
+}
+.maplibregl-ctrl-group .basemap-ctrl-btn[aria-expanded="true"] {
+  background-color: #dde6ef;
+  color: #17324d;
+}
+/* Opens to the left of the button, top-aligned with it: the control column
+   hugs the viewport's right edge, so there is no room on the other side.
+   Same box as the stock control group -- white, 4px radius, MapLibre's own
+   2px hairline shadow. */
+.basemap-menu {
+  position: absolute;
+  top: 0;
+  right: calc(100% + 6px);
+  margin: 0;
+  padding: 6px;
+  min-width: 170px;
+  background: #fff;
+  color: #333;
+  border: none;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1);
+  font-family: var(--font-label);
+  font-size: 12px;
+  /* The page's dark theme sets `color-scheme: dark` on :root, which makes the
+     browser draw native radios dark -- a dark disc on this always-white menu.
+     Pinned light to match the fixed colours above. */
+  color-scheme: light;
+}
+.basemap-menu[hidden] {
+  display: none;
+}
+/* Floated, because a <legend> otherwise renders straddling the fieldset's top
+   edge -- here, half outside the white box. A floated legend is laid out as
+   ordinary content inside it; .basemap-option's `clear` keeps the options
+   below it. */
+.basemap-menu legend {
+  float: left;
+  width: 100%;
+  padding: 0 4px 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #666;
+}
+.basemap-option {
+  clear: both;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.basemap-option:hover {
+  background: #f0f0f0;
+}
+/* The checked option is marked by its radio *and* by a ring on the preview,
+   so the active basemap reads at a glance rather than only via a 13px dot. */
+.basemap-option:has(input:checked) {
+  font-weight: 600;
+  color: #17324d;
+}
+.basemap-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 3px;
+  background: #e5e5e5;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+.basemap-option:has(input:checked) .basemap-thumb {
+  box-shadow: 0 0 0 2px #17324d;
+}
+.basemap-option input {
+  margin: 0;
+  accent-color: #17324d;
+}
+
 .maplibregl-popup-content {
   background: var(--paper-raised);
   color: var(--ink);

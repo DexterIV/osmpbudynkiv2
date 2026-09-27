@@ -584,6 +584,66 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
     },
   ];
 
+  // ---- basemap ----
+  //
+  // Two raster basemaps, one visible at a time: the OSM carto tiles and
+  // GUGiK's orthophoto (the "ORTOFOTOMAPA" layer of the PZGiK WMTS, whose
+  // EPSG:3857 matrix set is the standard Web Mercator grid with matrix ids
+  // "EPSG:3857:{z}" -- so a plain XYZ template over the KVP GetTile works, no
+  // WMTS client needed). The service is KVP-only (no RESTful ResourceURL) and
+  // answers with `Access-Control-Allow-Origin: *`.
+  //
+  // A standing per-viewer preference, like the theme: kept in localStorage,
+  // never in the `layers=` hash. It is read *before* the map is built so the
+  // style starts with the right layer visible -- a hidden raster layer's
+  // source fetches nothing, so the other basemap never costs a tile request.
+  //
+  // Note the data layers' colours were tuned against the light OSM raster
+  // (see the --ratio-* and --building-* comments in style.css). The orthophoto
+  // is darker and busier; that is an accepted trade-off of an opt-in view.
+  const OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+  const ORTO_TILE_URL =
+    "https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMTS/StandardResolution" +
+    "?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=ORTOFOTOMAPA&STYLE=default" +
+    "&FORMAT=image/jpeg&TILEMATRIXSET=EPSG:3857&TILEMATRIX=EPSG:3857:{z}&TILEROW={y}&TILECOL={x}";
+  // The menu's preview is one real tile of each basemap -- the same z15 tile
+  // over Warsaw's Old Town, which shows streets, roofs and river in both --
+  // so there is no image asset to keep in step with the service.
+  const BASEMAP_THUMB_TILE = { z: 15, x: 18296, y: 10786 };
+  function thumbUrl(template) {
+    const { z, x, y } = BASEMAP_THUMB_TILE;
+    return template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+  }
+  // `id` is both the style's source/layer id and the stored value.
+  const BASEMAPS = [
+    { id: "osm", label: "Mapa OSM", thumb: thumbUrl(OSM_TILE_URL) },
+    { id: "orto", label: "Ortofotomapa (standardowa rozdzielczość)", thumb: thumbUrl(ORTO_TILE_URL) },
+  ];
+  const DEFAULT_BASEMAP = "osm";
+  const BASEMAP_STORAGE_KEY = "osmpbudynkiv2.basemap";
+
+  // Same "the store may throw" guard as readStoredChangesWindow below.
+  function readStoredBasemap() {
+    try {
+      const stored = localStorage.getItem(BASEMAP_STORAGE_KEY);
+      return BASEMAPS.some((b) => b.id === stored) ? stored : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The default is stored as nothing, same as storeDisplayOptions.
+  function storeBasemap(value) {
+    try {
+      if (value === DEFAULT_BASEMAP) localStorage.removeItem(BASEMAP_STORAGE_KEY);
+      else localStorage.setItem(BASEMAP_STORAGE_KEY, value);
+    } catch {
+      /* Preference is not persisted; the session still works. */
+    }
+  }
+
+  let basemap = readStoredBasemap() || DEFAULT_BASEMAP;
+
   const map = new maplibregl.Map({
     container: "map",
     style: {
@@ -596,10 +656,22 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
       sources: {
         osm: {
           type: "raster",
-          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tiles: [OSM_TILE_URL],
           tileSize: 256,
           maxzoom: 19,
           attribution: "podkład mapowy &copy; współautorzy OpenStreetMap",
+        },
+        // `bounds` is the layer's WGS84BoundingBox from GetCapabilities, so
+        // panning off Poland requests nothing. The attribution control shows
+        // only sources with a visible layer, so the credit swaps with the
+        // basemap by itself.
+        orto: {
+          type: "raster",
+          tiles: [ORTO_TILE_URL],
+          tileSize: 256,
+          maxzoom: 19,
+          bounds: [13.8, 48.8, 24.4, 55.0],
+          attribution: "ortofotomapa GUGiK",
         },
         unmatched: {
           type: "vector",
@@ -621,7 +693,8 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
         },
       },
       layers: [
-        { id: "osm", type: "raster", source: "osm" },
+        { id: "osm", type: "raster", source: "osm", layout: { visibility: basemap === "osm" ? "visible" : "none" } },
+        { id: "orto", type: "raster", source: "orto", layout: { visibility: basemap === "orto" ? "visible" : "none" } },
         // Before buildingLayers/addresses so those features' own colours
         // stay crisp on top of the translucent export-area wash instead of
         // it tinting them.
@@ -707,6 +780,150 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
     attributionControl: false,
   });
   map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+  // Basemap picker, as a map control under the zoom/compass buttons rather
+  // than a legend group: it is a setting of the map itself, not a data layer
+  // the legend describes. A layers button opens a small menu naming every
+  // basemap with a preview, the active one checked -- so it says what is
+  // shown and what else there is, which a bare toggle could not. Click-to-open
+  // rather than hover-to-open, so it behaves the same on touch.
+  //
+  // The options are native radio inputs in a <fieldset>: arrow keys, the
+  // checked state and the group name come from the browser, not from ARIA
+  // written by hand. The menu closes on a pick, Escape, or a press anywhere
+  // outside it; Escape and a pick hand focus back to the button, an outside
+  // press leaves it where the user put it.
+  //
+  // A plain IControl (onAdd/onRemove) is all MapLibre asks for. The button
+  // sits in its own maplibregl-ctrl-group for the stock look; the menu is a
+  // sibling rather than a child of that group, whose `button + button`
+  // divider and rounded clip are meant for a column of icon buttons.
+  class BasemapControl {
+    onAdd(map) {
+      this._map = map;
+      this._container = document.createElement("div");
+      this._container.className = "maplibregl-ctrl basemap-ctrl";
+
+      const group = document.createElement("div");
+      group.className = "maplibregl-ctrl-group";
+      this._button = document.createElement("button");
+      this._button.type = "button";
+      this._button.className = "basemap-ctrl-btn";
+      this._button.title = "Podkład mapy";
+      this._button.setAttribute("aria-label", "Podkład mapy");
+      this._button.setAttribute("aria-expanded", "false");
+      this._button.setAttribute("aria-controls", "basemap-menu");
+      this._button.innerHTML =
+        '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">' +
+        '<path d="M12 3 2 8.5 12 14l10-5.5L12 3z" fill="currentColor"/>' +
+        '<path d="M4.3 11.8 2 13l10 5.5L22 13l-2.3-1.2L12 16l-7.7-4.2z" fill="currentColor" opacity="0.6"/>' +
+        "</svg>";
+      group.appendChild(this._button);
+
+      this._menu = document.createElement("fieldset");
+      this._menu.id = "basemap-menu";
+      this._menu.className = "basemap-menu";
+      this._menu.hidden = true;
+      const legend = document.createElement("legend");
+      legend.textContent = "Podkład mapy";
+      this._menu.appendChild(legend);
+      this._radios = BASEMAPS.map((b) => {
+        const label = document.createElement("label");
+        label.className = "basemap-option";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "basemap";
+        radio.value = b.id;
+        const thumb = document.createElement("img");
+        thumb.className = "basemap-thumb";
+        thumb.alt = "";
+        // Assigned on first open, so a visitor who never opens the menu
+        // never fetches the two preview tiles.
+        thumb.dataset.src = b.thumb;
+        const name = document.createElement("span");
+        name.textContent = b.label;
+        label.append(radio, thumb, name);
+        this._menu.appendChild(label);
+        radio.addEventListener("change", () => {
+          basemap = b.id;
+          storeBasemap(basemap);
+          this._apply();
+          if (this._pickedByPointer) this._close(true);
+        });
+        return radio;
+      });
+
+      this._button.addEventListener("click", () => {
+        if (this._menu.hidden) this._open();
+        else this._close(false);
+      });
+      // Arrow keys move the checked radio and fire `change` on every press,
+      // so the keyboard switches the basemap live and only Enter, Space or
+      // Escape closes; a click or tap closes on the pick itself. Which one
+      // caused a `change` is not on the event, hence the flag.
+      this._pickedByPointer = false;
+      this._menu.addEventListener("pointerdown", () => {
+        this._pickedByPointer = true;
+      });
+      this._menu.addEventListener("keydown", (e) => {
+        this._pickedByPointer = false;
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          this._close(true);
+        } else if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this._close(true);
+        }
+      });
+      this._onDocumentPointerDown = (e) => {
+        if (!this._container.contains(e.target)) this._close(false);
+      };
+
+      this._container.append(group, this._menu);
+      return this._container;
+    }
+
+    onRemove() {
+      document.removeEventListener("pointerdown", this._onDocumentPointerDown);
+      this._container.remove();
+      this._map = undefined;
+    }
+
+    _open() {
+      this._pickedByPointer = false;
+      for (const radio of this._radios) radio.checked = radio.value === basemap;
+      for (const img of this._menu.querySelectorAll("img[data-src]")) {
+        img.src = img.dataset.src;
+        img.removeAttribute("data-src");
+      }
+      this._menu.hidden = false;
+      this._button.setAttribute("aria-expanded", "true");
+      document.addEventListener("pointerdown", this._onDocumentPointerDown);
+      this._radios.find((r) => r.checked).focus();
+    }
+
+    _close(returnFocus) {
+      if (this._menu.hidden) return;
+      this._menu.hidden = true;
+      this._button.setAttribute("aria-expanded", "false");
+      document.removeEventListener("pointerdown", this._onDocumentPointerDown);
+      if (returnFocus) this._button.focus();
+    }
+
+    // The initial visibility is baked into the style, so this only runs on a
+    // pick. setLayoutProperty throws until the style has loaded, and a pick
+    // can in principle land before that -- then wait for it.
+    _apply() {
+      if (!this._map.getLayer("orto")) {
+        this._map.once("load", () => this._apply());
+        return;
+      }
+      for (const { id } of BASEMAPS) {
+        this._map.setLayoutProperty(id, "visibility", id === basemap ? "visible" : "none");
+      }
+    }
+  }
+  map.addControl(new BasemapControl(), "top-right");
   // `compact: false` keeps the attribution text always visible instead of
   // MapLibre's default behaviour of collapsing it behind a click-to-reveal
   // "i" button once the map narrows -- the default hides exactly the credit
