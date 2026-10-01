@@ -2236,8 +2236,8 @@ dependencies = [
 
 [[package]]
 name = "prg_convert"
-version = "0.7.0"
-source = "git+https://github.com/ttomasz/prg_convert?tag=v0.7.0#b856ceeda932c4df35f231ed23b392d0985adcfa"
+version = "0.8.0"
+source = "git+https://github.com/ttomasz/prg_convert?tag=v0.8.0#41322f15d4acf06c2fe72b713be573c46def0276"
 dependencies = [
  "anyhow",
  "arrow",

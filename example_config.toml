@@ -110,6 +110,21 @@ download = true
 # Can be overridden by the --terc-file CLI flag.
 # file_path = "./data/TERC_Urzedowy.zip"
 
+# PRG address import settings.
+[prg]
+# Order of the two numbers in each <gml:pos> of the PRG file.
+#   "auto" - follow the srsName each point declares: `EPSG:2180` is easting
+#            first (files until August 2026), anything else is northing first
+#            (files since 2026-10-01). Right for every file published so far.
+#   "xy"   - force easting first, whatever the file declares.
+#   "yx"   - force northing first, whatever the file declares.
+# Leave this on "auto" unless `import prg` / `update prg` fails with "PRG
+# coordinates do not fit Poland's extent" and says the other order fits: that
+# is a file declaring one order and using the other. A load that does not fit
+# is never stored, so there is nothing to repair afterwards -- set the order
+# and run it again. Can be overridden by the --coordinate-order CLI flag.
+coordinate_order = "auto"
+
 # Download URLs for data sources
 [download_urls]
 osm_pbf = "https://download.openstreetmap.fr/extracts/europe/poland-latest.osm.pbf"

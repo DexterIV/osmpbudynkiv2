@@ -10,11 +10,11 @@ use duckdb::arrow::datatypes::Schema;
 use duckdb::core::LogicalTypeId;
 use duckdb::vtab::arrow::to_duckdb_logical_type_for_field;
 use prg_convert::terc::Terc;
-use prg_convert::{get_address_parser_2021_zip, get_teryt_mapping};
+use prg_convert::{CoordOrder, get_address_parser_2021_zip, get_teryt_mapping};
 use tracing::info;
 use zip::ZipArchive;
 
-use crate::config::Config;
+use crate::config::{Config, CoordinateOrder};
 use crate::download::{download_file_as, download_file_as_quiet};
 use crate::utils::format_duration;
 
@@ -35,19 +35,24 @@ type PreparedSource = (PathBuf, bool, Arc<HashMap<String, Terc>>);
 /// A TERC mapping is required to resolve voivodeship/county/municipality names
 /// from the TERYT codes embedded in the 2021 GML. Resolution priority:
 /// `--terc-file` CLI flag > `teryt.file_path` in config > TERYT API download.
+///
+/// `coordinate_order` is the `--coordinate-order` CLI flag; see
+/// [`resolve_coordinate_order`].
 pub fn import(
     conn: &Connection,
     config: &Config,
     file: Option<&Path>,
     terc_file: Option<&Path>,
     url: &str,
+    coordinate_order: Option<CoordinateOrder>,
 ) -> Result<()> {
     let total = std::time::Instant::now();
 
     let (zip_path, was_downloaded, terc) = prepare_source(config, file, terc_file, url, true)?;
+    let coordinate_order = resolve_coordinate_order(config, coordinate_order);
 
     let raw_table = "prg_addresses_raw";
-    stream_gml_into(conn, &zip_path, &terc, raw_table)?;
+    stream_gml_into(conn, &zip_path, &terc, raw_table, coordinate_order)?;
     cleanup_if_downloaded(&zip_path, was_downloaded && config.cleanup_downloaded_files);
 
     // Materialize the final table with a geometry column built from
@@ -108,18 +113,20 @@ pub fn update_prg(
     file: Option<&Path>,
     terc_file: Option<&Path>,
     url: &str,
+    coordinate_order: Option<CoordinateOrder>,
     source_etag: Option<&str>,
     show_progress: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let (zip_path, was_downloaded, terc) =
         prepare_source(config, file, terc_file, url, show_progress)?;
+    let coordinate_order = resolve_coordinate_order(config, coordinate_order);
     let result = crate::update::dataset::refresh(
         conn,
         &crate::dataset::PRG,
         |c, target| {
             let raw = format!("{target}_raw");
-            stream_gml_into(c, &zip_path, &terc, &raw)?;
+            stream_gml_into(c, &zip_path, &terc, &raw, coordinate_order)?;
             // PRG does not filter invalid geometry (that's bdot10k/egib-only,
             // see `crate::dataset::filter_invalid_geometry`), so
             // `materialize_into`'s `LoadStats` carries only the null-key and
@@ -134,6 +141,29 @@ pub fn update_prg(
         store_teryt_units(conn, &terc);
     }
     result.map(|_| ())
+}
+
+/// The axis order to force on the parser, or `None` to let it follow each
+/// point's `srsName`. Resolution priority: `--coordinate-order` CLI flag >
+/// `prg.coordinate_order` in config; both default to `auto`.
+///
+/// `None` is right for every file published so far: `prg_convert` reads
+/// `srsName="EPSG:2180"` as easting first (the 2021-schema files until August
+/// 2026) and anything else as northing first (the files since 2026-10-01).
+/// Forcing an order is for a file whose declaration contradicts its numbers,
+/// which is what `prg_axis::check_axis_order` reports.
+fn resolve_coordinate_order(
+    config: &Config,
+    cli_override: Option<CoordinateOrder>,
+) -> Option<CoordOrder> {
+    let order = cli_override.unwrap_or(config.prg.coordinate_order);
+    if order != CoordinateOrder::Auto {
+        tracing::warn!(
+            coordinate_order = ?order,
+            "PRG axis order is forced; the srsName declared in the file is ignored"
+        );
+    }
+    order.forced()
 }
 
 /// Replace `teryt_units` with the TERC map this load used (see
@@ -272,11 +302,19 @@ fn cleanup_if_downloaded(zip_path: &Path, should_delete: bool) {
 /// The table is created by [`create_table_for_schema`] rather than a
 /// `CREATE TABLE AS SELECT` over the first batch, because that CTAS needs the
 /// same leaking function.
+///
+/// `coordinate_order` goes straight to the parser (see
+/// [`resolve_coordinate_order`]). **An axis order is only ever corrected
+/// here, in the parser, never afterwards in SQL**: PRG compares geometry by
+/// value, and DuckDB's reprojection differs from `prg_convert`'s in the last
+/// bits for a third of all rows, so a position recomputed in SQL would make
+/// those rows diff as modified. See `docs/prg_axis_order.md`.
 fn stream_gml_into(
     conn: &Connection,
     zip_path: &Path,
     terc: &Arc<HashMap<String, Terc>>,
     raw_table: &str,
+    coordinate_order: Option<CoordOrder>,
 ) -> Result<()> {
     let zip_str = zip_path
         .to_str()
@@ -333,6 +371,7 @@ fn stream_gml_into(
             &2048, // STANDARD_VECTOR_SIZE; arrow vtab panics on larger batches
             terc,
             idx,
+            coordinate_order,
         )
         .with_context(|| format!("Failed to build PRG 2021 parser for zip entry {idx}"))?;
 
@@ -486,16 +525,22 @@ pub fn materialize_into(
     raw_table: &str,
 ) -> Result<crate::dataset::LoadStats> {
     let non_null = crate::dataset::non_null_key_sql(crate::dataset::PRG.key_columns);
+    // The rows the load select keeps. Shared with the axis-order check below,
+    // so the check judges exactly the rows that are about to be stored.
+    let loaded_rows = format!(
+        "dlugosc_geograficzna IS NOT NULL \
+           AND szerokosc_geograficzna IS NOT NULL \
+           AND {non_null}"
+    );
     let inner = format!(
         "SELECT lokalny_id, numer_porzadkowy, \
                 ({ULICA_PREFIX_STRIP_SQL}) AS ulica, \
                 miejscowosc, kod_pocztowy, teryt_miejscowosc, teryt_gmina, gmina, \
                 wazny_od_lub_data_nadania, wersja_id, \
-                ST_Point(dlugosc_geograficzna, szerokosc_geograficzna) AS geom \
+                {point} AS geom \
          FROM {raw_table} \
-         WHERE dlugosc_geograficzna IS NOT NULL \
-           AND szerokosc_geograficzna IS NOT NULL \
-           AND {non_null}"
+         WHERE {loaded_rows}",
+        point = super::prg_axis::POINT_SQL,
     );
 
     // A filtered CTAS doesn't report how many rows its WHERE excluded, so
@@ -548,6 +593,17 @@ pub fn materialize_into(
             skipped_missing_coordinates_example_ids
                 .push(id.context("Failed to read coordinate-less id")?);
         }
+    }
+
+    // Last thing before `target_table` is dropped and rebuilt: an import that
+    // fails here leaves an existing `prg_addresses` exactly as it was. The
+    // rejected rows are not left behind either -- on the `update` path the raw
+    // table is not one of the scratch tables `refresh` cleans up.
+    if let Err(e) = super::prg_axis::check_axis_order(conn, raw_table, &loaded_rows) {
+        if let Err(drop_err) = conn.execute_batch(&format!("DROP TABLE IF EXISTS {raw_table}")) {
+            tracing::warn!(raw_table, error = %drop_err, "failed to drop rejected PRG raw table");
+        }
+        return Err(e);
     }
 
     conn.execute_batch(&format!(
@@ -1000,11 +1056,130 @@ mod tests {
         .unwrap();
         let terc = Arc::new(terc);
 
-        stream_gml_into(&conn, Path::new("fixtures/prg.zip"), &terc, "prg_raw").unwrap();
+        stream_gml_into(&conn, Path::new("fixtures/prg.zip"), &terc, "prg_raw", None).unwrap();
 
         let woj: String = conn
             .query_row("SELECT DISTINCT wojewodztwo FROM prg_raw", [], |r| r.get(0))
             .unwrap();
         assert_eq!(woj, "lubuskie");
+    }
+
+    fn stream_fixture(conn: &Connection, coordinate_order: Option<CoordOrder>) {
+        let terc = get_teryt_mapping(
+            false,
+            &None,
+            &None,
+            &Some(PathBuf::from("fixtures/teryt.zip")),
+        )
+        .unwrap();
+        stream_gml_into(
+            conn,
+            Path::new("fixtures/prg.zip"),
+            &Arc::new(terc),
+            "prg_raw",
+            coordinate_order,
+        )
+        .unwrap();
+    }
+
+    /// **The exact bits of one projected point, pinned on purpose.** PRG
+    /// compares geometry by value and its report signature includes the
+    /// geometry, so if this test fails after a dependency bump, the projection
+    /// moved and the next `update prg` will (1) diff every one of ~8.6M rows as
+    /// modified, dirtying every cell, and (2) expire every active PRG report.
+    /// It already happened once: `proj4rs` 0.1.9 -> 0.1.10 (with
+    /// `crs-definitions` 0.3.1 -> 0.4.0) moved every latitude by 9e-10 degrees,
+    /// about 0.1 mm. Do not "fix" this by editing the numbers without deciding
+    /// what to do about those two consequences first.
+    #[test]
+    fn the_parser_projects_a_known_point_to_known_bits() {
+        let init = vec!["INSTALL spatial".to_string(), "LOAD spatial".to_string()];
+        let conn = init_db(Path::new(":memory:"), &init, None).unwrap();
+        stream_fixture(&conn, None);
+
+        let (x, y, lon, lat): (f64, f64, f64, f64) = conn
+            .query_row(
+                "SELECT x_epsg_2180, y_epsg_2180, dlugosc_geograficzna, szerokosc_geograficzna
+                 FROM prg_raw ORDER BY lokalny_id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((x, y), (216691.39, 505645.69));
+        // `f64` equality on purpose: the same bits, not merely a close value.
+        assert_eq!((lon, lat), (14.839103470789498, 52.343421935204525));
+    }
+
+    /// The fixture declares `srsName="EPSG:2180"` (easting first), so `auto`
+    /// and a forced `xy` agree and a forced `yx` mirrors every point. This is
+    /// the proof that the order reaches the parser at all.
+    #[test]
+    fn stream_gml_into_passes_the_coordinate_order_to_the_parser() {
+        let init = vec!["INSTALL spatial".to_string(), "LOAD spatial".to_string()];
+        let conn = init_db(Path::new(":memory:"), &init, None).unwrap();
+        let read = |order| -> Vec<(f64, f64)> {
+            stream_fixture(&conn, order);
+            let mut stmt = conn
+                .prepare("SELECT x_epsg_2180, y_epsg_2180 FROM prg_raw ORDER BY lokalny_id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<duckdb::Result<_>>()
+                .unwrap()
+        };
+
+        let auto = read(None);
+        assert!(!auto.is_empty());
+        assert_eq!(read(Some(CoordOrder::XY)), auto);
+        let mirrored: Vec<(f64, f64)> = auto.iter().map(|&(x, y)| (y, x)).collect();
+        assert_eq!(read(Some(CoordOrder::YX)), mirrored);
+    }
+
+    /// A load that fails the axis-order check must leave an existing target
+    /// table exactly as it was and must not leave the rejected rows behind.
+    #[test]
+    fn materialize_rejects_a_mirrored_load_before_touching_the_target() {
+        let init = vec!["INSTALL spatial".to_string(), "LOAD spatial".to_string()];
+        let conn = init_db(Path::new(":memory:"), &init, None).unwrap();
+        // Hrubieszów (23.9E, 50.8N) with longitude and latitude exchanged.
+        conn.execute_batch(
+            "CREATE TABLE prg_out AS SELECT 'kept' AS marker;
+             CREATE TABLE prg_raw (
+                 ulica VARCHAR,
+                 dlugosc_geograficzna DOUBLE,
+                 szerokosc_geograficzna DOUBLE,
+                 lokalny_id VARCHAR,
+                 wersja_id INTEGER,
+                 numer_porzadkowy VARCHAR,
+                 miejscowosc VARCHAR,
+                 kod_pocztowy VARCHAR,
+                 teryt_miejscowosc VARCHAR,
+                 teryt_gmina VARCHAR,
+                 gmina VARCHAR,
+                 wazny_od_lub_data_nadania DATE
+             );
+             INSERT INTO prg_raw VALUES
+                 ('Testowa', 50.8, 23.9, 'a', 1, '1', 'Test', '00-000', '0611011', '0611011', 'Test Gmina', NULL);",
+        )
+        .unwrap();
+
+        let err = materialize_into(&conn, "prg_out", "prg_raw").unwrap_err();
+        assert!(
+            format!("{err:#}").starts_with(crate::import::prg_axis::AXIS_ORDER_BAIL_MESSAGE),
+            "{err:#}"
+        );
+
+        let marker: String = conn
+            .query_row("SELECT marker FROM prg_out", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(marker, "kept");
+        let raw_left: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'prg_raw'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_left, 0);
     }
 }

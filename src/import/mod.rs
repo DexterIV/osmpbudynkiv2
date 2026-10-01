@@ -2,6 +2,7 @@ pub mod bdot10k;
 pub mod egib;
 pub mod osm;
 pub mod prg;
+pub mod prg_axis;
 pub mod teryt;
 
 use anyhow::Result;
@@ -31,13 +32,18 @@ pub fn run(
             reconcile_reports(conn, &crate::dataset::EGIB);
             Ok(())
         }
-        ImportSource::Prg { file, terc_file } => {
+        ImportSource::Prg {
+            file,
+            terc_file,
+            coordinate_order,
+        } => {
             prg::import(
                 conn,
                 config,
                 file.as_deref(),
                 terc_file.as_deref(),
                 &urls.prg,
+                coordinate_order,
             )?;
             reconcile_reports(conn, &crate::dataset::PRG);
             Ok(())
@@ -82,6 +88,7 @@ pub fn run(
                 prg_file.as_deref(),
                 terc_file.as_deref(),
                 &urls.prg,
+                None,
             )?;
             crate::shutdown::check_requested()?;
             run_street_mappings_import(

@@ -849,6 +849,53 @@ exposure, not breakage. Five points:
    case where OSM data *is* dropped, counted separately as `dropped_degenerate`.
 5. An existing database keeps its invalid rows until `import osm` is re-run.
 
+**Gotcha — PRG's axis order is read from each point's `srsName`, checked
+against Poland's extent, and only ever corrected in the parser.** GUGiK's
+2021-schema files changed on 2026-10-01 from `srsName="EPSG:2180"` with easting
+first to `urn:ogc:def:crs:EPSG::2180` with northing first. Read in the wrong
+order, every address is mirrored across the line easting = northing and nothing
+errors: `update prg` diffs all ~8.6M rows as modified (PRG compares geometry),
+and every active PRG report expires (its signature includes the geometry).
+Write-up and measurements: `docs/prg_axis_order.md`. Five things:
+
+1. **The rule lives in `prg_convert`**, not here
+   (`common::coord_order_for_srs_name`): the short form `EPSG:2180` is easting
+   first, and everything else — the URN, any other form, a missing attribute —
+   is northing first. `stream_gml_into` passes `None` to follow it.
+   `[prg] coordinate_order` / `--coordinate-order` (CLI wins) forces an order
+   for a file whose declaration is wrong, and is passed to the parser too.
+2. **`prg_axis::check_axis_order` is the backstop, and its signal is the
+   dataset's extent, not the rows.** Most mirrored points stay inside Poland;
+   what moves is the extent. Mirrored, the October snapshot puts 316,280 rows
+   (3.67%) outside `POLAND_EXTENT` against 0 for real data — and all of them
+   come from four voivodeships (lubelskie, podlaskie, podkarpackie,
+   małopolskie). **The other twelve mirror entirely onto Polish territory, so
+   a mirrored load of one of them alone passes**, the lubuskie test fixture
+   included. `a_mirrored_load_of_lubuskie_alone_passes` pins that as a
+   limitation; tests of the failing path must use eastern points.
+3. **The check runs before the target is dropped and rebuilt**, so a rejected
+   `import prg` leaves an existing `prg_addresses` intact, and it drops the raw
+   table itself because `refresh`'s `ScratchGuard` does not know about it. It
+   is one streaming aggregate; the example ids come from a separate `LIMIT`
+   query run only on failure — collecting them inside the aggregate would hold
+   every outside id.
+4. **Never recompute a position in SQL**, not even to repair a swap. DuckDB's
+   PROJ and `prg_convert`'s `proj4rs` disagree in the last bits for 33.6% of
+   rows (at most 2.4 nm), so a third of the table would diff as modified. A
+   failed load is not repaired at all: the override re-reads it through the
+   parser, which is what makes August → October a diff of only real edits
+   (8,589,935 of 8,595,749 shared ids bit-identical).
+5. **The projection library is the same hazard.** `proj4rs` 0.1.9 → 0.1.10
+   moved every latitude by 0.1 mm.
+   `import::prg::tests::the_parser_projects_a_known_point_to_known_bits` pins
+   one fixture point bit for bit; when a dependency bump fails it, the next
+   `update prg` would rewrite the table and expire the reports, so decide what
+   to do about that before editing the numbers.
+
+Individual records are deliberately out of scope: 34 addresses in gmina Mosina
+are written in the opposite order to the rest of their file in every snapshot,
+and nothing checks, repairs or drops them.
+
 **Gotcha — `/package` membership is intersection, not centroid containment.**
 Both building queries select with `ST_Intersects(b.geom, <request polygon>)`, so a
 building the request area merely clips is exported. This is deliberate: the user

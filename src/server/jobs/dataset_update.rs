@@ -45,6 +45,7 @@ impl DatasetUpdateJob {
             "prg" => UpdateSource::Prg {
                 file: None,
                 terc_file: None,
+                coordinate_order: None,
             },
             other => unreachable!("unknown dataset spec {other}"),
         }
@@ -132,7 +133,8 @@ mod tests {
             job.source(),
             UpdateSource::Prg {
                 file: None,
-                terc_file: None
+                terc_file: None,
+                coordinate_order: None
             }
         ));
     }

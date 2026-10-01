@@ -107,7 +107,11 @@ pub fn run(
             cleanup_if_downloaded(&path, was_downloaded && config.cleanup_downloaded_files);
             result.map(|_| ())
         }
-        UpdateSource::Prg { file, terc_file } => {
+        UpdateSource::Prg {
+            file,
+            terc_file,
+            coordinate_order,
+        } => {
             let mut etag = None;
             if file.is_none() {
                 let (unchanged, remote) = source_unchanged(conn, spec::PRG.name, &urls.prg)?;
@@ -127,6 +131,7 @@ pub fn run(
                 file.as_deref(),
                 terc_file.as_deref(),
                 &urls.prg,
+                coordinate_order,
                 etag.as_deref(),
                 show_progress,
                 is_cancelled,

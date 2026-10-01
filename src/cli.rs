@@ -265,6 +265,11 @@ pub enum ImportSource {
         /// the 2021 schema; overrides `teryt.file_path` from the config file.
         #[arg(long)]
         terc_file: Option<PathBuf>,
+        /// Order of the two numbers in each gml:pos: `auto` follows the
+        /// srsName each point declares, `xy` forces easting first, `yx`
+        /// northing first. Overrides `prg.coordinate_order` from the config.
+        #[arg(long, value_enum, ignore_case = true)]
+        coordinate_order: Option<crate::config::CoordinateOrder>,
     },
     /// Import the curated PRG -> OSM street name mappings from CSV
     StreetMappings {
@@ -343,5 +348,10 @@ pub enum UpdateSource {
         /// Path to a TERC (TERYT) dictionary file (.zip or .xml).
         #[arg(long)]
         terc_file: Option<PathBuf>,
+        /// Order of the two numbers in each gml:pos: `auto` follows the
+        /// srsName each point declares, `xy` forces easting first, `yx`
+        /// northing first. Overrides `prg.coordinate_order` from the config.
+        #[arg(long, value_enum, ignore_case = true)]
+        coordinate_order: Option<crate::config::CoordinateOrder>,
     },
 }

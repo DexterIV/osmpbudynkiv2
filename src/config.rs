@@ -30,6 +30,40 @@ impl Default for TerytConfig {
     }
 }
 
+/// Order of the two numbers in each PRG `<gml:pos>`; see [`PrgConfig`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum CoordinateOrder {
+    /// Follow the `srsName` each point declares (`prg_convert`'s rule).
+    #[default]
+    Auto,
+    /// Easting first, whatever the file declares.
+    Xy,
+    /// Northing first, whatever the file declares.
+    Yx,
+}
+
+impl CoordinateOrder {
+    /// The order to force on the parser, or `None` to let it follow `srsName`.
+    pub fn forced(self) -> Option<prg_convert::CoordOrder> {
+        match self {
+            CoordinateOrder::Auto => None,
+            CoordinateOrder::Xy => Some(prg_convert::CoordOrder::XY),
+            CoordinateOrder::Yx => Some(prg_convert::CoordOrder::YX),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PrgConfig {
+    /// Override for a PRG file whose `srsName` declares one axis order while
+    /// its numbers use the other. `auto` is right for every file published so
+    /// far; `import::prg_axis::check_axis_order` is what says when it is not.
+    /// Overridden by the `--coordinate-order` CLI flag.
+    pub coordinate_order: CoordinateOrder,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -82,6 +116,7 @@ pub struct Config {
     /// new changes.
     pub cleanup_downloaded_files: bool,
     pub teryt: TerytConfig,
+    pub prg: PrgConfig,
     pub duckdb_init_commands: Vec<String>,
     /// Number of connections in the shared DuckDB pool used by the `run`
     /// (HTTP server) command. All connections are `try_clone()`s of one base
@@ -647,6 +682,7 @@ impl Default for Config {
             download_dir: None,
             cleanup_downloaded_files: true,
             teryt: TerytConfig::default(),
+            prg: PrgConfig::default(),
             // All SET commands use GLOBAL scope. The `run` server pools multiple
             // connections that are try_clone()s of one base connection (see
             // server::ClonedConnectionManager); most DuckDB settings default to
@@ -911,6 +947,37 @@ file_path = "/data/TERC.zip"
         assert_eq!(config.teryt.api_username.as_deref(), Some("testuser"));
         assert_eq!(config.teryt.api_password.as_deref(), Some("testpass"));
         assert_eq!(config.teryt.file_path.as_deref(), Some("/data/TERC.zip"));
+    }
+
+    #[test]
+    fn test_prg_coordinate_order_defaults_to_auto() {
+        let config = load_config(None).unwrap();
+        assert_eq!(config.prg.coordinate_order, CoordinateOrder::Auto);
+        assert_eq!(config.prg.coordinate_order.forced(), None);
+    }
+
+    #[test]
+    fn test_prg_coordinate_order_override() {
+        for (value, order, forced) in [
+            ("auto", CoordinateOrder::Auto, None),
+            ("xy", CoordinateOrder::Xy, Some(prg_convert::CoordOrder::XY)),
+            ("yx", CoordinateOrder::Yx, Some(prg_convert::CoordOrder::YX)),
+        ] {
+            let mut tmp = tempfile::NamedTempFile::new().unwrap();
+            write!(tmp, "[prg]\ncoordinate_order = \"{value}\"\n").unwrap();
+            let config = load_config(Some(tmp.path())).unwrap();
+            assert_eq!(config.prg.coordinate_order, order);
+            assert_eq!(config.prg.coordinate_order.forced(), forced);
+        }
+    }
+
+    /// A typo must not silently fall back to `auto`: the setting exists to
+    /// override a wrong reading, and a misspelt override would leave it on.
+    #[test]
+    fn test_prg_coordinate_order_rejects_an_unknown_value() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "[prg]\ncoordinate_order = \"ne\"\n").unwrap();
+        assert!(load_config(Some(tmp.path())).is_err());
     }
 
     #[test]
