@@ -205,6 +205,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             computed_at TIMESTAMP WITH TIME ZONE
         );
 
+        -- The TERC catalogue: every wojewodztwo (2-digit code), powiat (4) and
+        -- gmina (7; types 1-3 only, the ones PRG uses) with its name. Replaced wholesale by every PRG load
+        -- from the TERC map that load fetched, and empty until the first one.
+        -- Join PRG to it by the 2-/4-digit prefix of teryt_gmina. See
+        -- import/teryt.rs.
+        CREATE TABLE IF NOT EXISTS teryt_units (
+            code VARCHAR,
+            level VARCHAR,
+            name VARCHAR
+        );
+
         -- Curated PRG -> OSM street-name expansions, applied by
         -- server/package.rs when building addr:street. A row with a NULL
         -- teryt_simc_code is a global rule; a non-NULL one scopes the rule to

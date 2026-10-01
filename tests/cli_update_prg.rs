@@ -220,6 +220,25 @@ fn distinct_cells(conn: &duckdb::Connection, sql: &str) -> Vec<(i32, i32)> {
 /// no change areas, and nothing enqueued. A government source that
 /// republished an identical snapshot would otherwise flush cached tiles for a
 /// change that never happened.
+/// A refresh that ran rewrites `teryt_units` from the TERC map it parsed
+/// with, so a database loaded before the table existed fills it on its next
+/// real refresh -- simulated here by emptying it after the import.
+#[test]
+fn test_update_prg_stores_the_terc_catalogue() {
+    let (cfg, _dir, db_path) = file_config();
+    import_v1(&cfg);
+    {
+        let conn = open(&db_path);
+        conn.execute_batch("DELETE FROM teryt_units").unwrap();
+    }
+    update_with(&cfg, "fixtures/prg_v2.zip").success();
+
+    let units: i64 = open(&db_path)
+        .query_row("SELECT COUNT(*) FROM teryt_units", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(units, 2875);
+}
+
 #[test]
 fn test_update_prg_unchanged_snapshot_is_a_noop() {
     let (cfg, _dir, db_path) = file_config();

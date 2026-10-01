@@ -2,6 +2,7 @@ pub mod bdot10k;
 pub mod egib;
 pub mod osm;
 pub mod prg;
+pub mod teryt;
 
 use anyhow::Result;
 use duckdb::Connection;

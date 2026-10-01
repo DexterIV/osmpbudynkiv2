@@ -83,6 +83,28 @@ fn test_import_prg_from_fixture() {
     // `docs/superpowers/plans/2026-08-14-column-trimming.md`), so it no
     // longer exists in `prg_addresses` to assert on here.
 
+    // The import also stores the TERC catalogue it parsed with, and PRG
+    // reaches it by the prefixes of `teryt_gmina` -- the fixture is all
+    // lubuskie.
+    let units: i64 = conn
+        .query_row("SELECT COUNT(*) FROM teryt_units", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(units, 2875, "fixtures/teryt.zip is the full national TERC");
+    let wojewodztwa: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT w.name FROM prg_addresses a
+                 JOIN teryt_units w ON w.code = left(a.teryt_gmina, 2)
+                 JOIN teryt_units p ON p.code = left(a.teryt_gmina, 4)",
+            )
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<duckdb::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(wojewodztwa, ["lubuskie"]);
+
     // Verify housenumbers are present.
     let housenumbers: Vec<String> = {
         let mut stmt = conn

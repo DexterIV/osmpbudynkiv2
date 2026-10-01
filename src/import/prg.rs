@@ -75,6 +75,8 @@ pub fn import(
         "Step done: create spatial index"
     );
 
+    store_teryt_units(conn, &terc);
+
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM prg_addresses", [], |row| row.get(0))?;
 
     info!(
@@ -128,7 +130,21 @@ pub fn update_prg(
         is_cancelled,
     );
     cleanup_if_downloaded(&zip_path, was_downloaded && config.cleanup_downloaded_files);
+    if result.is_ok() {
+        store_teryt_units(conn, &terc);
+    }
     result.map(|_| ())
+}
+
+/// Replace `teryt_units` with the TERC map this load used (see
+/// `import::teryt`). Warns instead of failing: by the time it runs the
+/// addresses are already committed, and a helper table the statistics page
+/// reads for context is no reason to report the PRG load itself as failed.
+fn store_teryt_units(conn: &Connection, terc: &HashMap<String, Terc>) {
+    match super::teryt::store(conn, terc) {
+        Ok(rows) => info!(rows, "Step done: store teryt_units"),
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not store teryt_units"),
+    }
 }
 
 /// Resolve the PRG zip (local file or download) and build the TERC mapping
