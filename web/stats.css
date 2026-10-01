@@ -169,7 +169,7 @@ body.stats-page {
 }
 /* Explicit size rather than the browser's automatic one, which is measured
    per browser and per font: the automatic width came out too tight for
-   "miejscowości" / "liczby brakujących" next to the arrow, and the automatic
+   "miejscowości" / "liczby niedopasowanych" next to the arrow, and the automatic
    height clipped descenders ("gminy") where the system font runs taller than
    the one it was sized for. 14em fits the longest option with the arrow. The
    2.5em height (border-box) is what fixes the clipping -- Chromium keeps a
@@ -312,6 +312,12 @@ body.stats-page {
    screen without a sideways scroll. */
 @media (max-width: 640px) {
   .stats-table td:not(.num) {
+    white-space: normal;
+  }
+  /* Column headings break too ("Niedopa-sowane", at the soft hyphen in the
+     markup): the longest is wider than any number under it, and unbroken it
+     pushes the ranking's "Mapa" link off screen. */
+  .stats-table thead th {
     white-space: normal;
   }
   .stats-table th,

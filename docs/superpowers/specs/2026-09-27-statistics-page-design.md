@@ -56,14 +56,14 @@ One row per source:
 | column | meaning |
 |---|---|
 | Porównywane | objects that take part in the comparison |
-| Brakuje w OSM | `count(*)` on `<source>_unmatched` |
-| % brakujących | unmatched / comparable, computed by the client |
+| Niedopasowane | `count(*)` on `<source>_unmatched` |
+| % niedopasowanych | unmatched / comparable, computed by the client |
 
 "Porównywane" is `count(*)` on the source table, with the filter the match
 rule applies to it. Only BDOT10k has one, and the count reuses
 `rule::BDOT10K_EKSPLOATOWANY_FILTER` rather than restating it.
 
-| Zbiór | Porównywane | Brakuje w OSM | % |
+| Zbiór | Porównywane | Niedopasowane | % |
 |---|---:|---:|---:|
 | Adresy (PRG) | 8,615,421 | 518,120 | 6.0 % |
 | Budynki (BDOT10k) | 16,016,117 | 485,317 | 3.0 % |
@@ -79,14 +79,14 @@ matched, suppressed and reported. Suppression is expensive to count
 (`suppressed_buildings_sql` takes 4.7 s and 3.8 GB per source over the
 national extent), and report precedence makes a subtraction double-count.
 
-### 4. Ranking: brakujące adresy według obszaru
+### 4. Ranking: niedopasowane adresy według obszaru
 
 One table with four controls:
 
 | control | values | default |
 |---|---|---|
 | Poziom | gmina / miejscowość | gmina |
-| Sortuj według | % brakujących / liczba brakujących | % |
+| Sortuj według | % niedopasowanych / liczba niedopasowanych | % |
 | Kolejność | malejąco / rosnąco | malejąco |
 | Obszar | one województwo, powiat or gmina, picked from suggestions | the whole country |
 
@@ -114,8 +114,8 @@ The table is paginated, 50 rows per page. Its columns:
 | Gmina | — | `gmina` + type |
 | TERC gminy | — | `teryt_gmina` |
 | Adresy | `count(*)` on `prg_addresses` per row | same |
-| Brakuje | `count(*)` on `prg_unmatched` per row | same |
-| % | brakuje / adresy | same |
+| Niedopasowane | `count(*)` on `prg_unmatched` per row | same |
+| % | niedopasowane / adresy | same |
 | Mapa | link to the map fitted to the extent of the row's PRG addresses | same |
 
 **A row is a group of `prg_addresses` by code and name together:**

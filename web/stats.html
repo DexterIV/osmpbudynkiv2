@@ -71,7 +71,8 @@
       <h2 id="h-registers">Rejestry publiczne</h2>
       <p class="stats-muted">
         Porównywane: obiekty biorące udział w porównaniu z OSM (w BDOT10k tylko
-        budynki eksploatowane). Brakuje w OSM: obiekty proponowane do dodania.
+        budynki eksploatowane). Niedopasowane: obiekty bez odpowiednika w OSM,
+        proponowane do dodania.
       </p>
       <div class="stats-table-wrap">
         <table class="stats-table">
@@ -79,8 +80,8 @@
             <tr>
               <th scope="col">Zbiór</th>
               <th scope="col" class="num">Porównywane</th>
-              <th scope="col" class="num">Brakuje w OSM</th>
-              <th scope="col" class="num">% brakujących</th>
+              <th scope="col" class="num">Niedopa&shy;sowane</th>
+              <th scope="col" class="num">% niedopa&shy;sowanych</th>
             </tr>
           </thead>
           <tbody id="datasets-body"></tbody>
@@ -131,7 +132,7 @@
     </section>
 
     <section aria-labelledby="h-areas">
-      <h2 id="h-areas">Brakujące adresy według obszaru</h2>
+      <h2 id="h-areas">Niedopasowane adresy według obszaru</h2>
       <form id="areas-controls" class="stats-controls">
         <label>Poziom
           <select name="level">
@@ -141,8 +142,8 @@
         </label>
         <label>Sortuj według
           <select name="sort">
-            <option value="ratio">% brakujących</option>
-            <option value="unmatched">liczby brakujących</option>
+            <option value="ratio">% niedopasowanych</option>
+            <option value="unmatched">liczby niedopasowanych</option>
           </select>
         </label>
         <label>Kolejność
@@ -176,7 +177,7 @@
               <th scope="col" id="areas-gmina-col" hidden>Gmina</th>
               <th scope="col" id="areas-gmina-code-col" hidden>TERC gminy</th>
               <th scope="col" class="num">Adresy</th>
-              <th scope="col" class="num">Brakuje</th>
+              <th scope="col" class="num">Niedopa&shy;sowane</th>
               <th scope="col" class="num">%</th>
               <th scope="col"><span class="visually-hidden">Pokaż na mapie</span></th>
             </tr>
