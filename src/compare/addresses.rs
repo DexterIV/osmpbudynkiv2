@@ -97,6 +97,55 @@ fn compare_addresses(conn: &Connection) -> Result<()> {
 
 fn compare_addresses_in_txn(conn: &Connection) -> Result<()> {
     conn.execute_batch("DELETE FROM prg_unmatched;")?;
+    conn.execute_batch(&build_sql())
+        .context("Failed to run address comparison query")?;
+
+    // Inside the same transaction as the rows it counts, so a cell's numerator
+    // and denominator always come from one comparison.
+    crate::compare::totals::rebuild_all_in_txn(conn, "prg")
+        .context("Failed to rebuild cell totals for prg")?;
+
+    Ok(())
+}
+
+/// The `INSERT INTO prg_unmatched ...` statement `compare_addresses_in_txn`
+/// runs. Its own function so a regression test can `EXPLAIN` the real
+/// generated SQL rather than a hand-reconstructed copy -- the same seam as
+/// `compare::incremental::build_sql`, for the same reason: what it guards
+/// changes the plan and not the answer, so no functional test can see it.
+///
+/// **The matched ids are removed with an explicit `ANTI JOIN`, never
+/// `NOT EXISTS (SELECT 1 FROM matched_ids m WHERE m.lokalny_id =
+/// s.lokalny_id)`.** The two return identical rows, but `matched_ids` is a
+/// `SELECT DISTINCT`, and DuckDB does not flatten a correlated `EXISTS` over an
+/// aggregate into a plain anti-join: it plans a `LEFT_DELIM_JOIN`, which
+/// materializes *every* `prg_addresses` row with all ten projected columns,
+/// de-duplicates the 8.2M correlated ids, joins the matched ids against those,
+/// and only then anti-joins. The explicit form is one hash anti-join with
+/// `prg_addresses` streamed through as the probe side.
+///
+/// That is a memory difference before it is a speed one, and the memory is
+/// what bites. Measured on the national tables (8.2M PRG, 8.7M OSM addresses),
+/// standalone, 8 threads:
+///
+/// | `memory_limit` | `NOT EXISTS`                         | `ANTI JOIN`           |
+/// |----------------|--------------------------------------|-----------------------|
+/// | 6.5 GB         | 3.2 s, 5.0 GB RSS, no spill          | —                     |
+/// | 4 GB           | 7.1 s, 1.9 GB spilled                | 2.7 s, 2.5 GB RSS, none |
+/// | 3.5 GB         | 16.4 s, 4.4 GB spilled               | —                     |
+/// | 3 GB           | fails: 8 GB temp directory exhausted | 5.0 s, 1.1 GB spilled |
+/// | 1.5 GB         | —                                    | 20.7 s, 6.2 GB spilled |
+///
+/// The `NOT EXISTS` shape needs ~5 GB of working memory and its spill grows
+/// steeply below that, so on a host without it this one statement goes from
+/// seconds to an hour while the building compares barely notice (production,
+/// 2026-10-01: 1h 3m 53s here against 18m 32s for bdot10k).
+///
+/// The report veto below is still a correlated `NOT EXISTS`, and still a
+/// `DELIM_JOIN` -- over the ~500k rows that survive the anti-join, not the
+/// table, so it costs nothing worth restructuring `rule::reported_sql` for.
+/// `the_matched_ids_are_removed_by_a_plain_anti_join` pins the difference.
+fn build_sql() -> String {
     let cx = crate::tile_math::cell_x_sql("s.geom");
     let cy = crate::tile_math::cell_y_sql("s.geom");
     // The name rules resolve PRG's street through `street_name_mappings`, the
@@ -118,7 +167,7 @@ fn compare_addresses_in_txn(conn: &Connection) -> Result<()> {
     // though everything around it differs from the per-cell path. Correlates
     // on `s`, the final projection's alias over `prg_addresses`.
     let reported = crate::compare::rule::reported_sql(&crate::dataset::PRG, "s");
-    conn.execute_batch(&format!(
+    format!(
         "INSERT INTO prg_unmatched
          (geom, lokalny_id, numer_porzadkowy, ulica, miejscowosc, kod_pocztowy,
           teryt_miejscowosc, wazny_od_lub_data_nadania, teryt_gmina, gmina, cell_x, cell_y, computed_at)
@@ -175,17 +224,9 @@ fn compare_addresses_in_txn(conn: &Connection) -> Result<()> {
                 s.kod_pocztowy, s.teryt_miejscowosc, s.wazny_od_lub_data_nadania,
                 s.teryt_gmina, s.gmina, {cx}, {cy}, now()
          FROM prg_addresses s
-         WHERE NOT EXISTS (SELECT 1 FROM matched_ids m WHERE m.lokalny_id = s.lokalny_id)
-           AND NOT {reported};"
-    ))
-    .context("Failed to run address comparison query")?;
-
-    // Inside the same transaction as the rows it counts, so a cell's numerator
-    // and denominator always come from one comparison.
-    crate::compare::totals::rebuild_all_in_txn(conn, "prg")
-        .context("Failed to rebuild cell totals for prg")?;
-
-    Ok(())
+         ANTI JOIN matched_ids m ON m.lokalny_id = s.lokalny_id
+         WHERE NOT {reported};"
+    )
 }
 
 #[cfg(test)]
@@ -731,5 +772,56 @@ mod tests {
         }
 
         assert_eq!(full, per_cell, "full grid-key and per-cell rule disagree");
+    }
+
+    /// Number of `DELIM_JOIN` operators in `sql`'s plan. Read from
+    /// `EXPLAIN (FORMAT JSON)` rather than the box-drawing pretty-printer,
+    /// which truncates operator labels in a plan this wide.
+    fn delim_joins(conn: &Connection, sql: &str) -> usize {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN (FORMAT JSON) {sql}"))
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let mut plan = String::new();
+        while let Some(row) = rows.next().unwrap() {
+            plan.push_str(&row.get::<_, String>(1).unwrap_or_default());
+        }
+        plan.matches("DELIM_JOIN").count()
+    }
+
+    /// The matched ids must leave through an explicit `ANTI JOIN`, not a
+    /// correlated `NOT EXISTS` over the `DISTINCT` CTE -- see `build_sql`'s
+    /// doc comment for what the latter materializes and what that cost in
+    /// production. Both spellings return the same rows, so every functional
+    /// test here passes either way; only the plan differs.
+    ///
+    /// Carries its own negative control: the `NOT EXISTS` spelling is rebuilt
+    /// from the real statement and must plan one `DELIM_JOIN` more. If a
+    /// DuckDB upgrade makes the two counts equal, the optimizer has learned to
+    /// flatten that shape and this guard has become vacuous -- nothing broke.
+    /// (The one `DELIM_JOIN` both keep is the report veto's.)
+    #[test]
+    fn the_matched_ids_are_removed_by_a_plain_anti_join() {
+        let conn = setup();
+        let sql = build_sql();
+
+        let anti = "ANTI JOIN matched_ids m ON m.lokalny_id = s.lokalny_id\n         WHERE NOT ";
+        assert!(
+            sql.contains(anti),
+            "the statement no longer removes matched ids with an ANTI JOIN: {sql}"
+        );
+        let not_exists = sql.replace(
+            anti,
+            "WHERE NOT EXISTS (SELECT 1 FROM matched_ids m WHERE m.lokalny_id = s.lokalny_id)\n           AND NOT ",
+        );
+
+        let with_anti = delim_joins(&conn, &sql);
+        let with_not_exists = delim_joins(&conn, &not_exists);
+        assert_eq!(
+            with_anti + 1,
+            with_not_exists,
+            "expected the NOT EXISTS spelling to plan exactly one DELIM_JOIN more \
+             than the ANTI JOIN one (got {with_anti} vs {with_not_exists})"
+        );
     }
 }
