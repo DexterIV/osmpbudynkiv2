@@ -14,7 +14,41 @@ use crate::tile_math::{cell_x_sql, cell_y_sql};
 use crate::utils::format_duration;
 
 /// Grid cell size in degrees for chunked spatial comparison (memory bound).
-const GRID_STEP: f64 = 0.5;
+///
+/// **Larger is faster, and that is the whole reason this is not smaller.**
+/// Each cell's statement scans the *entire* source table sequentially and
+/// tests every centroid against the cell -- the write-narrow guard below keeps
+/// the centroid RTREE out of the plan, and the scan is what the full compare
+/// wants anyway (see the per-cell-recompute gotcha in `CLAUDE.md`). So the
+/// cost of finding a cell's rows is `cells x one table scan`, independent of
+/// what the cell holds. At 0.5° that was 252 scans and ~65% of all CPU, with
+/// 52 of the cells writing no row at all. Measured on the national bdot10k
+/// table at a 4 GB `memory_limit`, same rule text:
+///
+/// | step | cells | wall  |
+/// |------|-------|-------|
+/// | 0.5° | 252   | 255 s |
+/// | 1°   | 66    | 130 s |
+/// | 2°   | 18    | 86 s  |
+///
+/// **A smaller step does not buy the index back.** The RTREE only appears if
+/// the source scan is wrapped in a `candidates` CTE, and then fetching a row
+/// through it costs ~54 µs of CPU whatever the cell size -- the tables are not
+/// spatially clustered on disk, so every fetch is effectively random. Over one
+/// 2°x2° block: 26.4 s at 0.5°, 29.1 s at 0.25°, 45.8 s at 0.125°, against
+/// 10.6 s for the single sequential-scan cell.
+///
+/// What bounds it from above is memory: the anti-join's `DELIM_JOIN`
+/// materializes the cell's `b.geom`, and the `SPATIAL_JOIN` builds over the
+/// cell's `osm_buildings`. The densest 2° cell holds ~1.9M source rows and
+/// ran without spilling at 4 GB.
+///
+/// The step is also, very slightly, a *result* input: `osm_buildings` is
+/// filtered by the cell envelope, so a government building whose only covering
+/// OSM building lies wholly in the neighbouring cell reads as unmatched.
+/// Fewer cell edges mean fewer of those (485,314 unmatched bdot10k rows at
+/// 0.5°, 485,310 at 2°).
+const GRID_STEP: f64 = 2.0;
 
 pub fn compare_bdot10k(conn: &Connection) -> Result<()> {
     compare_buildings(
@@ -177,7 +211,7 @@ fn compare_buildings_with_cancel(
     // not been re-imported -- and every test fixture -- pays nothing extra.
     //
     // Unlike the grid loop above, this is ONE query over the whole extent
-    // rather than 252 cell-scoped ones. That only works because
+    // rather than one per grid cell. That only works because
     // suppressed_buildings_sql filters by the former-building veto first and
     // runs the expensive osm_buildings anti-join over just those candidates
     // -- see its doc comment. Spelled flat (the shape unmatched_buildings_sql
@@ -250,7 +284,7 @@ fn compare_buildings_with_cancel(
 /// Because the extent comes from the data rather than a fixed box, a single
 /// malformed coordinate inflates the cell count that the caller then iterates
 /// one query at a time. Even a *valid* WGS84 outlier is enough: one row at
-/// (-180, -90) turns Poland's 264 cells into 259 200. So the cell count is
+/// (-180, -90) turns Poland's 24 cells into 7 519. So the cell count is
 /// capped — exceeding the cap means the source table holds a coordinate no
 /// grid should be built around, which is a data fault worth failing loudly on
 /// rather than silently skipping (the old hardcoded box) or grinding for hours
@@ -261,10 +295,13 @@ fn source_grid_extent(
     grid_step: f64,
 ) -> Result<(f64, f64, f64, f64)> {
     const FALLBACK: (f64, f64, f64, f64) = (14.0, 49.0, 25.0, 55.0);
-    /// ~8× the historical Poland grid (22 × 12 = 264 cells) — generous enough
-    /// for a stray row a few degrees outside the country, far short of the
-    /// blow-up a wild coordinate causes.
-    const MAX_GRID_CELLS: f64 = 2048.0;
+    /// ~8× the Poland grid (6 × 4 = 24 cells at `GRID_STEP` = 2°) — generous
+    /// enough for a stray row a few degrees outside the country, far short of
+    /// the blow-up a wild coordinate causes. Scaled with `GRID_STEP`, not left
+    /// at the 2048 it was for a 0.5° step: every cell costs a full scan of the
+    /// source table whether or not it holds anything, so the cap is a bound on
+    /// wasted scans and has to stay a small multiple of the real grid.
+    const MAX_GRID_CELLS: f64 = 192.0;
 
     let row: (Option<f64>, Option<f64>, Option<f64>, Option<f64>) = conn.query_row(
         &format!(
@@ -387,8 +424,8 @@ mod tests {
     }
 
     /// Deriving the grid from the data means one wild coordinate would
-    /// otherwise inflate a 264-cell grid into hundreds of thousands of
-    /// one-query-each iterations. A row at the WGS84 extreme is a valid
+    /// otherwise inflate a 24-cell grid into thousands of
+    /// one-full-table-scan-each iterations. A row at the WGS84 extreme is a valid
     /// geometry, so nothing upstream rejects it -- the cap must, and the error
     /// must point at the extent so the operator can find the bad row.
     #[test]
@@ -457,11 +494,21 @@ mod tests {
     /// test deleted in the Task 4 refactor -- see
     /// `git show 0331d15^:src/compare/buildings.rs`, which asserted 2 rows
     /// before the chunked scan's write predicate was narrowed). A centroid
-    /// exactly on a 0.5° grid line satisfies both neighbouring cells'
+    /// exactly on a grid line satisfies both neighbouring cells'
     /// ST_Intersects envelope test (closed on all four edges), so without a
     /// narrow write it would be inserted twice.
+    ///
+    /// The fixture is tied to `GRID_STEP` and says so: at a step where 16.0 is
+    /// not a grid line the row is interior to one cell, and this would pass
+    /// without exercising the guard at all.
     #[test]
     fn compare_chunked_duplicates_source_on_cell_boundary() {
+        assert_eq!(
+            (16.0 / GRID_STEP).fract(),
+            0.0,
+            "this fixture puts a centroid on x = 16.0, which must be a grid line; \
+             move it when GRID_STEP changes"
+        );
         let conn = setup();
         conn.execute_batch(
             "CREATE TABLE bdot10k_buildings (PRZESTRZENNAZW VARCHAR, LOKALNYID VARCHAR, geom GEOMETRY, centroid GEOMETRY,
@@ -470,19 +517,38 @@ mod tests {
                  NAZWA VARCHAR, FSBUD VARCHAR, INFORMACJADODATKOWA VARCHAR, KODKST TINYINT,
                  ZRODLODANYCHGEOMETRYCZNYCH VARCHAR);
              INSERT INTO bdot10k_buildings (LOKALNYID, geom) VALUES
-                 -- centroid (14.5, 52.25): x = 14.5 is the boundary between
-                 -- the [14.0,14.5) and [14.5,15.0) grid columns; y = 52.25 is
+                 -- centroid (16.0, 52.25): x = 16.0 is the boundary between
+                 -- the [14.0,16.0) and [16.0,18.0) grid columns; y = 52.25 is
                  -- safely mid-row.
-                 ('boundary', ST_MakeEnvelope(14.4998,52.2498,14.5002,52.2502)),
+                 ('boundary', ST_MakeEnvelope(15.9998,52.2498,16.0002,52.2502)),
                  -- Widens the source extent so both neighbouring columns are
                  -- actually scanned by the chunked loop -- a lone boundary
                  -- point would otherwise sit at a tightly-snapped extent edge
                  -- and only ever be scanned by one cell, which would not
                  -- exercise the guard at all.
                  ('anchor', ST_MakeEnvelope(14.05,52.25,14.06,52.26));
-             UPDATE bdot10k_buildings SET centroid = ST_Centroid(geom);",
+             UPDATE bdot10k_buildings SET centroid = ST_Centroid(geom);
+             -- Set outright rather than derived: ST_Centroid of those decimal
+             -- corners is not guaranteed to land on 16.0 to the last bit, and
+             -- a centroid a hair off the line is interior to one cell.
+             UPDATE bdot10k_buildings SET centroid = ST_Point(16.0, 52.25)
+              WHERE LOKALNYID = 'boundary';",
         )
         .unwrap();
+        let on_both: bool = conn
+            .query_row(
+                "SELECT ST_Intersects(centroid, ST_MakeEnvelope(14, 52, 16, 54))
+                    AND ST_Intersects(centroid, ST_MakeEnvelope(16, 52, 18, 54))
+                 FROM bdot10k_buildings WHERE LOKALNYID = 'boundary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            on_both,
+            "the fixture must satisfy both neighbouring cells' envelope tests, \
+             or the write-narrow guard is not what makes the count 1"
+        );
         compare_bdot10k(&conn).unwrap();
         let n: i64 = conn
             .query_row(
@@ -616,7 +682,7 @@ mod tests {
                  NAZWA VARCHAR, FSBUD VARCHAR, INFORMACJADODATKOWA VARCHAR, KODKST TINYINT,
                  ZRODLODANYCHGEOMETRYCZNYCH VARCHAR);
              -- Two buildings several degrees apart so source_grid_extent
-             -- spans many 0.5-degree cells -- the cancellation below fires
+             -- spans many grid cells (12 at 2 degrees) -- the cancellation below fires
              -- partway through that scan, not on the only cell there is.
              INSERT INTO bdot10k_buildings (LOKALNYID, geom) VALUES
                  ('lonely_a', ST_MakeEnvelope(14.05,49.05,14.06,49.06)),
