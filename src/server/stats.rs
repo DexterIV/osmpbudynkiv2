@@ -1,12 +1,17 @@
-//! `GET /stats` and `GET /stats/areas`: the statistics page's data.
+//! `GET /stats`, `GET /stats/areas` and `GET /stats/units`: the statistics
+//! page's data.
 //!
-//! Both are plain queries run per request; the only caching is HTTP, a
+//! All are plain queries run per request; the only caching is HTTP, a
 //! `max-age` of `[cache] stats_max_age_seconds`. `/stats` is a handful of
 //! counts over whole tables (~0.1 s on the Poland database), `/stats/areas` one
 //! aggregation per page (~0.07 s for gminy, ~0.11 s for settlements). Pages
 //! read live data, so a recompute landing between two page requests can move
 //! an area from one page to the next -- accepted in exchange for having no
 //! server-side state at all.
+//!
+//! `/stats/units` is the whole `teryt_units` table (~2,900 rows). The page's
+//! area search filters it in the browser and sends back only the picked
+//! unit's code, as `/stats/areas`'s `in`; there is no server-side text search.
 //!
 //! See docs/superpowers/specs/2026-09-27-statistics-page-design.md.
 
@@ -302,6 +307,18 @@ pub struct Area {
     pub bbox: Option<[f64; 4]>,
 }
 
+/// The `WHERE` narrowing either PRG table to one unit, or nothing. A unit's
+/// code is a prefix of the `teryt_gmina` of everything inside it (2 digits
+/// for a województwo, 4 for a powiat, all 7 for a gmina), so one clause serves
+/// all three and needs no join to `teryt_units`.
+fn scope_sql(scoped: bool) -> &'static str {
+    if scoped {
+        "WHERE starts_with(teryt_gmina, ?)"
+    } else {
+        ""
+    }
+}
+
 /// One page of one level, sorted by the requested key and direction, then by
 /// the key columns ascending so the order is total and pages never overlap.
 /// The only interpolated text comes from the enums above, never from the
@@ -317,18 +334,22 @@ pub struct Area {
 /// later; adding one means switching the extent to `min`/`max` of
 /// `ST_X`/`ST_Y`, which is ~30% slower at gmina level and ~10% at settlement
 /// level.
-fn areas_sql(level: Level, sort: SortKey, order: SortOrder) -> String {
+///
+/// With `scoped`, both sides are narrowed to one unit first, and the query
+/// takes its code twice ahead of `LIMIT`/`OFFSET`.
+fn areas_sql(level: Level, sort: SortKey, order: SortOrder, scoped: bool) -> String {
     let keys = level.key_columns();
     let area = level.area_columns();
     let (by, dir) = (sort.sql(), order.sql());
+    let scope = scope_sql(scoped);
     format!(
         "WITH a AS (
              SELECT {keys}, count(*) AS total, ST_Extent_Agg(geom) AS ext
-             FROM prg_addresses
+             FROM prg_addresses {scope}
              GROUP BY {keys}),
          u AS (
              SELECT {keys}, count(*) AS unmatched
-             FROM prg_unmatched
+             FROM prg_unmatched {scope}
              GROUP BY {keys})
          SELECT {area}, a.total, coalesce(u.unmatched, 0),
                 ST_XMin(ext), ST_YMin(ext), ST_XMax(ext), ST_YMax(ext),
@@ -341,9 +362,10 @@ fn areas_sql(level: Level, sort: SortKey, order: SortOrder) -> String {
 
 /// How many areas a level has; only needed for a page past the end, which
 /// returns no row to read `total_items` from.
-fn area_count_sql(level: Level) -> String {
+fn area_count_sql(level: Level, scoped: bool) -> String {
     format!(
-        "SELECT count(*) FROM (SELECT 1 FROM prg_addresses GROUP BY {})",
+        "SELECT count(*) FROM (SELECT 1 FROM prg_addresses {} GROUP BY {})",
+        scope_sql(scoped),
         level.key_columns()
     )
 }
@@ -353,6 +375,9 @@ struct AreasPage {
     level: &'static str,
     sort: &'static str,
     order: &'static str,
+    /// The unit the ranking is narrowed to, as requested.
+    #[serde(rename = "in")]
+    within: Option<String>,
     total_items: i64,
     page: u64,
     per_page: u64,
@@ -361,12 +386,19 @@ struct AreasPage {
 
 fn query_areas(conn: &Connection, q: &AreasQuery) -> Result<AreasPage> {
     let offset = (q.page - 1) * q.per_page;
+    let scope = q.within.as_deref();
     let mut stmt = conn
-        .prepare(&areas_sql(q.level, q.sort, q.order))
+        .prepare(&areas_sql(q.level, q.sort, q.order, scope.is_some()))
         .context("Failed to prepare area query")?;
     let mut total_items = None;
+    let mut params: Vec<&dyn duckdb::ToSql> = Vec::new();
+    if let Some(code) = &scope {
+        params.extend([code as &dyn duckdb::ToSql, code]);
+    }
+    let (limit, offset) = (q.per_page as i64, offset as i64);
+    params.extend([&limit as &dyn duckdb::ToSql, &offset]);
     let rows = stmt
-        .query_map(duckdb::params![q.per_page as i64, offset as i64], |r| {
+        .query_map(params.as_slice(), |r| {
             let area = Area {
                 teryt: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 name: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -390,12 +422,17 @@ fn query_areas(conn: &Connection, q: &AreasQuery) -> Result<AreasPage> {
     }
     let total_items = match total_items {
         Some(n) => n,
-        None => count(conn, &area_count_sql(q.level))?,
+        None => {
+            let sql = area_count_sql(q.level, scope.is_some());
+            conn.query_row(&sql, duckdb::params_from_iter(scope), |r| r.get(0))
+                .with_context(|| format!("stats query failed: {sql}"))?
+        }
     };
     Ok(AreasPage {
         level: q.level.as_str(),
         sort: q.sort.as_str(),
         order: q.order.as_str(),
+        within: q.within.clone(),
         total_items,
         page: q.page,
         per_page: q.per_page,
@@ -408,6 +445,8 @@ pub struct AreasParams {
     pub level: Option<String>,
     pub sort: Option<String>,
     pub order: Option<String>,
+    #[serde(rename = "in")]
+    pub within: Option<String>,
     pub page: Option<String>,
     pub per_page: Option<String>,
 }
@@ -417,6 +456,8 @@ pub struct AreasQuery {
     pub level: Level,
     pub sort: SortKey,
     pub order: SortOrder,
+    /// A TERC code to narrow the ranking to: 2, 4 or 7 digits.
+    pub within: Option<String>,
     pub page: u64,
     pub per_page: u64,
 }
@@ -459,12 +500,58 @@ pub fn parse_areas_params(p: &AreasParams) -> Result<AreasQuery, String> {
         Some("asc") => SortOrder::Asc,
         Some(other) => return Err(format!("order must be desc or asc, not '{other}'")),
     };
+    let within = match param(&p.within) {
+        None => None,
+        Some(code)
+            if matches!(code.len(), 2 | 4 | 7) && code.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            Some(code.to_string())
+        }
+        Some(other) => {
+            return Err(format!(
+                "in must be a TERC code of 2, 4 or 7 digits, not '{other}'"
+            ));
+        }
+    };
     Ok(AreasQuery {
         level,
         sort,
         order,
+        within,
         page: parse_count("page", &p.page, 1, MAX_PAGE)?,
         per_page: parse_count("per_page", &p.per_page, DEFAULT_PER_PAGE, MAX_PER_PAGE)?,
+    })
+}
+
+// --- Units (GET /stats/units) --------------------------------------------
+
+/// One row of `teryt_units`. The level is not sent: it is the code's length
+/// (2 województwo, 4 powiat, 7 gmina).
+#[derive(Serialize, Debug, PartialEq)]
+struct Unit {
+    code: String,
+    name: String,
+}
+
+#[derive(Serialize, Debug)]
+struct Units {
+    units: Vec<Unit>,
+}
+
+/// Every unit, by code. Empty on a database whose PRG was loaded before
+/// `teryt_units` existed; see `import::teryt`.
+fn query_units(conn: &Connection) -> Result<Units> {
+    let mut stmt = conn.prepare("SELECT code, name FROM teryt_units ORDER BY code")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Unit {
+            code: r.get(0)?,
+            name: r.get(1)?,
+        })
+    })?;
+    Ok(Units {
+        units: rows
+            .collect::<duckdb::Result<Vec<_>>>()
+            .context("Failed to read teryt_units")?,
     })
 }
 
@@ -524,6 +611,13 @@ pub async fn get_areas(
     };
     json_from_db(&state, "areas", move |conn| {
         Ok(serde_json::to_string(&query_areas(conn, &q)?)?)
+    })
+    .await
+}
+
+pub async fn get_units(State(state): State<AppState>) -> Response {
+    json_from_db(&state, "units", |conn| {
+        Ok(serde_json::to_string(&query_units(conn)?)?)
     })
     .await
 }
@@ -632,9 +726,122 @@ mod tests {
             level,
             sort,
             order,
+            within: None,
             page,
             per_page,
         }
+    }
+
+    /// `(simc, name, terc, gmina, addresses, unmatched)` in two województwa
+    /// and three powiaty, added on top of `ROWS` (whose codes all start
+    /// `0000`) by `scoped_conn`.
+    const SCOPED_ROWS: &[(&str, &str, &str, &str, usize, usize)] = &[
+        ("2000001", "Miasto", "0201011", "Miasto", 4, 1),
+        ("2000002", "Dwór", "0201022", "Miasto", 2, 2),
+        ("2000003", "Folwark", "0201022", "Miasto", 1, 0),
+        ("2000004", "Inny", "0202013", "Inny", 3, 0),
+        ("2000005", "Daleki", "0401011", "Daleki", 5, 5),
+    ];
+
+    fn scoped_conn() -> Connection {
+        let conn = seeded_conn();
+        for &(simc, name, terc, gmina, n, unmatched) in SCOPED_ROWS {
+            for i in 0..n {
+                conn.execute(
+                    "INSERT INTO prg_addresses VALUES (?, ?, ?, ?, ST_Point(18, 51))",
+                    duckdb::params![simc, name, terc, gmina],
+                )
+                .unwrap();
+                if i < unmatched {
+                    conn.execute(
+                        "INSERT INTO prg_unmatched (teryt_miejscowosc, miejscowosc, teryt_gmina, gmina)
+                         VALUES (?, ?, ?, ?)",
+                        duckdb::params![simc, name, terc, gmina],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        conn
+    }
+
+    /// `(teryt, total, unmatched)` of every area of `level` inside `code`,
+    /// by code.
+    fn within(conn: &Connection, level: Level, code: &str) -> Vec<(String, i64, i64)> {
+        let mut query = q(level, SortKey::Ratio, SortOrder::Desc, 1, MAX_PER_PAGE);
+        query.within = Some(code.into());
+        let page = query_areas(conn, &query).unwrap();
+        assert_eq!(page.total_items, page.items.len() as i64);
+        let mut areas: Vec<_> = page
+            .items
+            .into_iter()
+            .map(|a| (a.teryt, a.total, a.unmatched))
+            .collect();
+        areas.sort();
+        areas
+    }
+
+    fn area(teryt: &str, total: i64, unmatched: i64) -> (String, i64, i64) {
+        (teryt.into(), total, unmatched)
+    }
+
+    #[test]
+    fn a_unit_code_narrows_the_ranking_to_what_lies_inside_it() {
+        let conn = scoped_conn();
+        // Województwo 02: three gminy in two powiaty.
+        assert_eq!(
+            within(&conn, Level::Gmina, "02"),
+            [
+                area("0201011", 4, 1),
+                area("0201022", 3, 2),
+                area("0202013", 3, 0)
+            ]
+        );
+        // Powiat 0201.
+        assert_eq!(
+            within(&conn, Level::Gmina, "0201"),
+            [area("0201011", 4, 1), area("0201022", 3, 2)]
+        );
+        // A gmina is one row at its own level and its settlements at the other.
+        assert_eq!(
+            within(&conn, Level::Gmina, "0201022"),
+            [area("0201022", 3, 2)]
+        );
+        assert_eq!(
+            within(&conn, Level::Settlement, "0201022"),
+            [area("2000002", 2, 2), area("2000003", 1, 0)]
+        );
+        assert_eq!(
+            within(&conn, Level::Settlement, "0201011"),
+            [area("2000001", 4, 1)]
+        );
+        // A code nothing lies inside is an empty ranking, not an error.
+        assert_eq!(within(&conn, Level::Gmina, "99"), []);
+    }
+
+    #[test]
+    fn a_narrowed_ranking_pages_and_counts_only_its_own_areas() {
+        let conn = scoped_conn();
+        let page = |page| {
+            let mut query = q(Level::Gmina, SortKey::Unmatched, SortOrder::Desc, page, 2);
+            query.within = Some("02".into());
+            query_areas(&conn, &query).unwrap()
+        };
+        let teryts = |p: &AreasPage| p.items.iter().map(|a| a.teryt.clone()).collect::<Vec<_>>();
+        assert_eq!(teryts(&page(1)), ["0201022", "0201011"]);
+        assert_eq!(teryts(&page(2)), ["0202013"]);
+        // Past the end: no row to read the count from, so it is counted
+        // separately -- inside the unit, not nationally.
+        let past_end = page(3);
+        assert!(past_end.items.is_empty());
+        assert_eq!(
+            (
+                page(1).total_items,
+                page(2).total_items,
+                past_end.total_items
+            ),
+            (3, 3, 3)
+        );
     }
 
     /// Every area of a level, in the order of `sort`/`order`.
@@ -946,6 +1153,23 @@ mod tests {
             Level::Settlement
         );
         assert!(with(|p| p.level = Some("powiat".into())).is_err());
+        for code in ["02", "0201", "0201011"] {
+            let q = parse_areas_params(&AreasParams {
+                within: Some(code.into()),
+                ..Default::default()
+            });
+            assert_eq!(q.unwrap().within.as_deref(), Some(code));
+        }
+        // Not a TERC length, not digits, or text that would otherwise reach
+        // the query.
+        for bad in ["0", "020", "02010", "02010111", "ab", "02%", "０２"] {
+            let q = parse_areas_params(&AreasParams {
+                within: Some(bad.into()),
+                ..Default::default()
+            });
+            assert!(q.is_err(), "{bad}");
+        }
+        assert_eq!(with(|p| p.within = Some(" ".into())).unwrap().within, None);
         assert!(with(|p| p.sort = Some("name".into())).is_err());
         assert!(with(|p| p.order = Some("up".into())).is_err());
         assert!(with(|p| p.page = Some("0".into())).is_err());
@@ -1012,6 +1236,54 @@ mod tests {
         let (_, _, past_end) = get(state(), "/stats/areas?page=9").await;
         assert_eq!(past_end["items"], serde_json::json!([]));
         assert_eq!(past_end["total_items"], 3);
+    }
+
+    #[tokio::test]
+    async fn areas_endpoint_narrows_to_a_unit() {
+        let state = AppState::for_tests(crate::server::build_pool(scoped_conn(), 4).unwrap());
+        let (status, _, body) = get(state.clone(), "/stats/areas?in=0201").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["in"], "0201");
+        assert_eq!(body["total_items"], 2);
+
+        let (_, _, whole) = get(state.clone(), "/stats/areas").await;
+        assert!(whole["in"].is_null());
+        assert_eq!(whole["total_items"], 7);
+
+        let (status, cache_control, _) = get(state, "/stats/areas?in=020").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(cache_control, "no-store");
+    }
+
+    #[tokio::test]
+    async fn units_endpoint_serves_the_whole_catalogue_by_code() {
+        let conn = seeded_conn();
+        conn.execute_batch(
+            "INSERT INTO teryt_units VALUES
+                 ('0201011', 'gmina', 'Bolesławiec'),
+                 ('02', 'wojewodztwo', 'dolnośląskie'),
+                 ('0201', 'powiat', 'bolesławiecki')",
+        )
+        .unwrap();
+        let state = AppState::for_tests(crate::server::build_pool(conn, 4).unwrap());
+        let (status, cache_control, body) = get(state, "/stats/units").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cache_control, "public, max-age=300");
+        assert_eq!(
+            body,
+            serde_json::json!({"units": [
+                {"code": "02", "name": "dolnośląskie"},
+                {"code": "0201", "name": "bolesławiecki"},
+                {"code": "0201011", "name": "Bolesławiec"},
+            ]})
+        );
+    }
+
+    #[tokio::test]
+    async fn units_endpoint_is_an_empty_list_before_the_first_prg_load() {
+        let (status, _, body) = get(state(), "/stats/units").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"units": []}));
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@
 //! | `/tiles` out-of-range zoom (204) | `public, max-age=`[`OUT_OF_RANGE_ZOOM_MAX_AGE_SECONDS`] | none | none |
 //! | `/tiles` 500 | none set here -> falls through to the API default `no-store` | none | none |
 //! | `/updates` | `public, max-age=<updates_max_age_seconds>` | none | none |
-//! | `/stats`, `/stats/areas` | `public, max-age=<stats_max_age_seconds>` | none | none |
+//! | `/stats`, `/stats/areas`, `/stats/units` | `public, max-age=<stats_max_age_seconds>` | none | none |
 //! | `/stats/areas` 400, `/stats*` 500 | none set here -> `no-store` | none | none |
 //! | `web_dir/fonts/**` | `public, max-age=<font_max_age_seconds>, immutable` | none | none |
 //! | `web_dir/vendor/**` | `public, max-age=<static_max_age_seconds>` | none | none |

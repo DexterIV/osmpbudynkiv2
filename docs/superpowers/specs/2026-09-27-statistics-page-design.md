@@ -81,13 +81,28 @@ national extent), and report precedence makes a subtraction double-count.
 
 ### 4. Ranking: brakujące adresy według obszaru
 
-One table with three controls:
+One table with four controls:
 
 | control | values | default |
 |---|---|---|
 | Poziom | gmina / miejscowość | gmina |
 | Sortuj według | % brakujących / liczba brakujących | % |
 | Kolejność | malejąco / rosnąco | malejąco |
+| Obszar | one województwo, powiat or gmina, picked from suggestions | the whole country |
+
+**Obszar narrows the ranking to one unit; it is not a text filter.** The field
+suggests units by name (ignoring case, diacritics and `ł`) or by TERC code
+prefix, and only a picked suggestion takes effect: typed text that was not
+picked is dropped when the field loses focus. It is independent of Poziom, so
+a picked gmina is one row under "gminy" and its settlements under
+"miejscowości". The `#` column is the position within the narrowed ranking.
+
+The suggestions come from `teryt_units` (see `import/teryt.rs`), the TERC
+catalogue a PRG load stores: 2,875 units, sent whole to the browser by
+`GET /stats/units` and filtered there. Each suggestion shows what tells it
+from its namesakes -- the gmina type, powiat and województwo -- and its code.
+Settlements are not searchable: there are ~50,000 of them and `teryt_units`
+holds only TERC. Finding one means picking its gmina and switching Poziom.
 
 The table is paginated, 50 rows per page. Its columns:
 
@@ -196,6 +211,7 @@ level and ~10% at settlement level.
 | `level` | `gmina` \| `settlement` | `gmina` |
 | `sort` | `ratio` \| `unmatched` | `ratio` |
 | `order` | `desc` \| `asc` | `desc` |
+| `in` | a TERC code of 2, 4 or 7 digits | none (the whole country) |
 | `page` | 1–1,000,000 | `1` |
 | `per_page` | 1–200 | `50` |
 
@@ -204,6 +220,7 @@ level and ~10% at settlement level.
   "level": "gmina",
   "sort": "ratio",
   "order": "desc",
+  "in": null,
   "total_items": 2479,
   "page": 1,
   "per_page": 50,
@@ -221,6 +238,28 @@ over the row's PRG address points, aggregated in the same query as the
 counts. A malformed parameter is a 400 with a message. `page` is capped at
 1,000,000. A page past the end is a 200 with an empty `items` and the real
 `total_items`.
+
+`in` keeps the rows whose `teryt_gmina` starts with the code, on both
+`prg_addresses` and `prg_unmatched`, before grouping. A unit's code is a
+prefix of everything inside it, so one clause serves all three levels with no
+join. `total_items` counts the narrowed ranking. A well-formed code nothing
+lies inside is a 200 with no items; anything else is a 400.
+
+### `GET /stats/units`
+
+```json
+{ "units": [
+    { "code": "02", "name": "dolnośląskie" },
+    { "code": "0201", "name": "bolesławiecki" },
+    { "code": "0201011", "name": "Bolesławiec" }
+] }
+```
+
+All of `teryt_units`, by code, with no parameters: 109 kB, 24 kB gzipped. The
+level is the code's length (2 województwo, 4 powiat, 7 gmina), so it is not
+sent. The list is empty on a database whose PRG was loaded before the table
+existed; the page then says so in place of suggestions, and a code in the
+hash is shown bare.
 
 ## Page
 
@@ -241,8 +280,10 @@ counts. A malformed parameter is a 400 with a message. `page` is capped at
   the Mercator midpoint of `bbox`, and the zoom fits the extent into 85% of
   the current window, clamped to 5–17.
 - **The ranking controls live in the hash**
-  (`#level=settlement&sort=unmatched&order=asc&page=3`), so a ranking can be
-  shared. This page is not the map, so the rule that view options stay out of
+  (`#level=settlement&sort=unmatched&order=asc&in=0201&page=3`), so a ranking
+  can be shared. `in` is a code, never text; its name is looked up in the
+  units list, which is fetched on the field's first focus, or at load when the
+  hash carries `in`. This page is not the map, so the rule that view options stay out of
   the hash does not apply.
 - Numbers use `Intl.NumberFormat("pl-PL")` and dates
   `toLocaleString("pl-PL")`.
@@ -279,9 +320,11 @@ stats_max_age_seconds = 300
 
 These were considered and left out:
 
-- **A minimum-size filter and name search for the ranking.** The minimum size
-  is what makes the settlement-level percentage ranking useful, per the
-  consequence above.
+- **A minimum-size filter for the ranking.** The minimum size is what makes
+  the settlement-level percentage ranking useful, per the consequence above.
+- **Settlement search.** It needs a server-side suggestion source over
+  `prg_addresses`' ~50,000 settlements, and a second narrowing parameter: a
+  SIMC code is 7 digits like a gmina's TERC, but a different column.
 - **A breakdown of the BDOT10k rows outside the comparison** by
   `KATEGORIAISTNIENIA`: `w budowie` 142,946, `nieczynny` 116,823, `zniszczony`
   75,926.

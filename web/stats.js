@@ -1,14 +1,14 @@
 // Statistics page (stats.html): renders GET /stats and GET /stats/areas.
 //
 // The ranking's controls live in the URL hash
-// (#level=settlement&sort=unmatched&order=asc&page=3) so a ranking can be
-// shared. Unlike the map's view options, which deliberately stay out of the
+// (#level=settlement&sort=unmatched&order=asc&in=0201&page=3) so a ranking can
+// be shared. `in` is the TERC code of the unit the ranking is narrowed to. Unlike the map's view options, which deliberately stay out of the
 // hash, this is a separate page describing what to look at.
 (function () {
   "use strict";
 
   const PER_PAGE = 50;
-  const DEFAULTS = { level: "gmina", sort: "ratio", order: "desc", page: 1 };
+  const DEFAULTS = { level: "gmina", sort: "ratio", order: "desc", in: "", page: 1 };
   const ALLOWED = {
     level: ["gmina", "settlement"],
     sort: ["ratio", "unmatched"],
@@ -29,6 +29,9 @@
   const REPORT_STATUSES = ["active", "revoked", "expired"];
   // The last digit of a 7-character TERC gmina code.
   const GMINA_TYPES = { 1: "gmina miejska", 2: "gmina wiejska", 3: "gmina miejsko-wiejska" };
+  // A TERC code: województwo (2 digits), powiat (4) or gmina (7).
+  const UNIT_CODE = /^(\d{2}|\d{4}|\d{7})$/;
+  const MAX_SUGGESTIONS = 10;
 
   // "always": Polish formatting groups only from five digits up (CLDR
   // minimumGroupingDigits = 2), so 3665 would sit bare next to 17 989 407 in
@@ -270,6 +273,8 @@
       const value = params.get(key);
       if (ALLOWED[key].includes(value)) state[key] = value;
     }
+    const unit = params.get("in");
+    if (UNIT_CODE.test(unit)) state.in = unit;
     const page = Number.parseInt(params.get("page"), 10);
     if (Number.isFinite(page) && page >= 1) state.page = page;
     return state;
@@ -292,6 +297,7 @@
   function syncControls(state) {
     const form = $("areas-controls");
     for (const key of Object.keys(ALLOWED)) form.elements[key].value = state[key];
+    syncUnit(state);
   }
 
   function nameCell(item, level) {
@@ -332,6 +338,7 @@
       page: String(state.page),
       per_page: String(PER_PAGE),
     });
+    if (state.in) query.set("in", state.in);
     let data;
     try {
       data = await fetchJson(`stats/areas?${query}`);
@@ -369,6 +376,15 @@
       );
       tbody.append(row(cells));
     });
+    if (data.items.length === 0) {
+      const td = document.createElement("td");
+      td.className = "stats-empty";
+      td.colSpan = 9;
+      td.textContent = state.in ? "Brak adresów PRG w tym obszarze." : "Brak danych.";
+      const tr = document.createElement("tr");
+      tr.append(td);
+      tbody.append(tr);
+    }
 
     const pages = Math.max(1, Math.ceil(data.total_items / data.per_page));
     $("page-info").textContent = `Strona ${fmt(data.page)} z ${fmt(pages)} (${fmt(data.total_items)} ${settlement ? "miejscowości" : "gmin"})`;
@@ -382,6 +398,240 @@
     syncControls(current);
     loadAreas();
   }
+
+  // --- Area search --------------------------------------------------------
+  //
+  // A combobox over GET /stats/units, the whole TERC catalogue (~2,900
+  // units), fetched once and filtered here. Its only output is a picked
+  // unit's code in `current.in`: typed text that was not picked is discarded
+  // when the field loses focus.
+
+  const unitInput = $("unit-input");
+  const unitList = $("unit-list");
+  const unitClear = $("unit-clear");
+  let units = null; // [{code, name, folded}] by code, once loaded
+  let unitNames = new Map();
+  let unitsRequest = null;
+  let suggestions = [];
+  let activeIndex = -1;
+
+  /** Lowercase without diacritics, so "lodz" finds "Łódź". NFD does not
+   *  decompose ł, hence the explicit replacement. */
+  function fold(text) {
+    return text
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/ł/g, "l");
+  }
+
+  function loadUnits() {
+    unitsRequest ||= fetchJson("stats/units").then(
+      (data) => {
+        units = data.units.map((u) => ({ ...u, folded: fold(u.name) }));
+        unitNames = new Map(data.units.map((u) => [u.code, u.name]));
+        // A code from the hash was shown bare until its name arrived.
+        if (document.activeElement !== unitInput) syncUnit(current);
+      },
+      (e) => {
+        unitsRequest = null; // the next focus retries
+        throw e;
+      },
+    );
+    return unitsRequest;
+  }
+
+  /** "woj. dolnośląskie", "powiat bolesławiecki", or a gmina's bare name. */
+  function unitName(code) {
+    const name = unitNames.get(code);
+    if (name === undefined) return code;
+    if (code.length === 2) return `woj. ${name}`;
+    if (code.length === 4) return `powiat ${name}`;
+    return name;
+  }
+
+  /** What tells a unit from its namesakes: a gmina's type and the units
+   *  above it. */
+  function unitContext(code) {
+    const parts = [];
+    if (code.length === 7 && GMINA_TYPES[code.slice(-1)]) parts.push(GMINA_TYPES[code.slice(-1)]);
+    if (code.length > 4 && unitNames.has(code.slice(0, 4))) parts.push(unitName(code.slice(0, 4)));
+    if (code.length > 2 && unitNames.has(code.slice(0, 2))) parts.push(unitName(code.slice(0, 2)));
+    return parts.join(", ");
+  }
+
+  function unitLabel(code) {
+    const context = unitContext(code);
+    return context ? `${unitName(code)} (${context})` : unitName(code);
+  }
+
+  /** Up to MAX_SUGGESTIONS units for `text`. Digits match a code prefix, in
+   *  code order (so a unit precedes what it contains). Anything else matches
+   *  names: a whole name first, then a name starting with the text, a word
+   *  starting with it, and any other occurrence; within each, województwa
+   *  before powiaty before gminy. */
+  function matchUnits(text) {
+    const query = fold(text.trim());
+    if (!query) return [];
+    if (/^\d+$/.test(query)) {
+      return units.filter((u) => u.code.startsWith(query)).slice(0, MAX_SUGGESTIONS);
+    }
+    const ranked = [];
+    for (const u of units) {
+      const at = u.folded.indexOf(query);
+      if (at < 0) continue;
+      let rank = 3;
+      if (u.folded === query) rank = 0;
+      else if (at === 0) rank = 1;
+      else if (/[\s-]/.test(u.folded[at - 1])) rank = 2;
+      ranked.push({ rank, unit: u });
+    }
+    ranked.sort(
+      (a, b) =>
+        a.rank - b.rank ||
+        a.unit.code.length - b.unit.code.length ||
+        a.unit.name.localeCompare(b.unit.name, "pl") ||
+        a.unit.code.localeCompare(b.unit.code),
+    );
+    return ranked.slice(0, MAX_SUGGESTIONS).map((r) => r.unit);
+  }
+
+  function setActive(index) {
+    activeIndex = index;
+    [...unitList.children].forEach((li, i) => li.setAttribute("aria-selected", String(i === index)));
+    if (index >= 0) unitInput.setAttribute("aria-activedescendant", unitList.children[index].id);
+    else unitInput.removeAttribute("aria-activedescendant");
+  }
+
+  function closeSuggestions() {
+    suggestions = [];
+    unitList.hidden = true;
+    unitList.replaceChildren();
+    unitInput.setAttribute("aria-expanded", "false");
+    setActive(-1);
+  }
+
+  /** The list with one line of text instead of options. */
+  function showNote(text) {
+    closeSuggestions();
+    const li = document.createElement("li");
+    li.className = "stats-combo-note";
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-disabled", "true");
+    li.textContent = text;
+    unitList.append(li);
+    unitList.hidden = false;
+    unitInput.setAttribute("aria-expanded", "true");
+  }
+
+  function showSuggestions() {
+    if (!unitInput.value.trim()) {
+      closeSuggestions();
+      return;
+    }
+    if (units.length === 0) {
+      showNote("Lista obszarów pojawi się po najbliższej aktualizacji PRG.");
+      return;
+    }
+    const found = matchUnits(unitInput.value);
+    if (found.length === 0) {
+      showNote("Brak pasujących obszarów.");
+      return;
+    }
+    closeSuggestions();
+    suggestions = found;
+    found.forEach((u, i) => {
+      const li = document.createElement("li");
+      li.id = `unit-option-${i}`;
+      li.setAttribute("role", "option");
+      li.dataset.index = String(i);
+      const text = document.createElement("span");
+      text.className = "stats-combo-text";
+      text.textContent = unitName(u.code);
+      const context = unitContext(u.code);
+      if (context) {
+        const sub = document.createElement("span");
+        sub.className = "stats-sub";
+        sub.textContent = ` ${context}`;
+        text.append(sub);
+      }
+      const code = document.createElement("span");
+      code.className = "stats-combo-code";
+      code.textContent = u.code;
+      li.append(text, code);
+      unitList.append(li);
+    });
+    unitList.hidden = false;
+    unitInput.setAttribute("aria-expanded", "true");
+    // The best match is preselected, so Enter picks it.
+    setActive(0);
+  }
+
+  function suggest() {
+    loadUnits().then(
+      () => {
+        if (document.activeElement === unitInput) showSuggestions();
+      },
+      () => showNote("Nie udało się wczytać listy obszarów."),
+    );
+  }
+
+  /** Shows the unit the ranking is narrowed to, or an empty field. */
+  function syncUnit(state) {
+    unitInput.value = state.in ? unitLabel(state.in) : "";
+    unitClear.hidden = !state.in;
+  }
+
+  function pickUnit(code) {
+    closeSuggestions();
+    update({ in: code, page: 1 });
+    // Typing again replaces the picked name instead of extending it.
+    unitInput.select();
+  }
+
+  unitInput.addEventListener("focus", () => {
+    loadUnits().catch(() => {});
+    unitInput.select();
+  });
+  unitInput.addEventListener("input", suggest);
+  unitInput.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (suggestions.length === 0) {
+        suggest();
+        return;
+      }
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setActive((activeIndex + step + suggestions.length) % suggestions.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (activeIndex >= 0) pickUnit(suggestions[activeIndex].code);
+    } else if (event.key === "Escape") {
+      closeSuggestions();
+      syncUnit(current);
+      unitInput.select();
+    }
+  });
+  // Text that was typed but not picked is dropped.
+  unitInput.addEventListener("blur", () => {
+    closeSuggestions();
+    syncUnit(current);
+  });
+  // Keeps the focus in the field, so the click lands before `blur` empties
+  // the list.
+  unitList.addEventListener("mousedown", (event) => event.preventDefault());
+  unitList.addEventListener("click", (event) => {
+    const li = event.target.closest("li[data-index]");
+    if (li) pickUnit(suggestions[Number(li.dataset.index)].code);
+  });
+  unitList.addEventListener("mousemove", (event) => {
+    const li = event.target.closest("li[data-index]");
+    if (li && Number(li.dataset.index) !== activeIndex) setActive(Number(li.dataset.index));
+  });
+  unitClear.addEventListener("click", () => {
+    update({ in: "", page: 1 });
+    unitInput.focus();
+  });
 
   // --- Theme -------------------------------------------------------------
   //
@@ -463,6 +713,8 @@
   });
 
   syncControls(current);
+  // A shared link carries only the code; its name comes with the list.
+  if (current.in) loadUnits().catch(() => {});
   fetchJson("stats")
     .then(renderSummary)
     .catch((e) => {

@@ -557,6 +557,7 @@ pub fn build_router(state: AppState) -> Router {
         // served by the static fallback below -- a different path.
         .route("/stats", axum::routing::get(stats::get_stats))
         .route("/stats/areas", axum::routing::get(stats::get_areas))
+        .route("/stats/units", axum::routing::get(stats::get_units))
         .route(
             "/josm_plugins/v2/nearest_building",
             axum::routing::get(josm_plugins::get_nearest_building),

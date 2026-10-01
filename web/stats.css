@@ -189,6 +189,102 @@ body.stats-page {
   border-radius: 3px;
 }
 
+/* The area search: a text field whose suggestions drop down over the
+   table. It takes the rest of the controls row. */
+.stats-search {
+  display: flex;
+  flex: 1 1 18em;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.stats-combo {
+  position: relative;
+}
+.stats-combo input {
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+  height: 2.5em;
+  /* Room on the right for the clear button. */
+  padding: 0 2.2em 0 8px;
+  color: var(--ink);
+  background: var(--paper-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  text-overflow: ellipsis;
+}
+.stats-combo input::placeholder {
+  color: var(--ink-soft);
+  opacity: 0.8;
+}
+.stats-combo-clear {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 2.2em;
+  height: 100%;
+  padding: 0;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--ink-soft);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.stats-combo-clear:hover,
+.stats-combo-clear:focus-visible {
+  color: var(--ink);
+}
+.stats-combo-list {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.18);
+}
+.stats-combo-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.stats-combo-list li[aria-selected="true"] {
+  background: var(--line);
+}
+.stats-combo-list li.stats-combo-note {
+  color: var(--ink-soft);
+  cursor: default;
+}
+/* Name and context wrap together; the code stays at the right edge. */
+.stats-combo-list .stats-combo-text {
+  flex: 1;
+  min-width: 0;
+}
+.stats-combo-list .stats-combo-code {
+  font-family: var(--font-data);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.stats-table td.stats-empty {
+  padding: 16px 8px;
+  text-align: center;
+  color: var(--ink-soft);
+  white-space: normal;
+}
+
 .stats-pager {
   display: flex;
   align-items: center;

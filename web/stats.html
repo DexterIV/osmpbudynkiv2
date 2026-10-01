@@ -151,6 +151,20 @@
             <option value="asc">rosnąco</option>
           </select>
         </label>
+        <!-- Narrows the ranking to one województwo, powiat or gmina. The
+             field only picks from the suggestions (stats.js filters the
+             /stats/units list in the browser); typed text is never a filter
+             by itself. -->
+        <div class="stats-search">
+          <label for="unit-input">Obszar</label>
+          <div class="stats-combo">
+            <input id="unit-input" type="text" role="combobox" autocomplete="off" spellcheck="false"
+                   aria-autocomplete="list" aria-expanded="false" aria-controls="unit-list"
+                   placeholder="województwo, powiat, gmina lub kod TERC" />
+            <button id="unit-clear" type="button" class="stats-combo-clear" aria-label="Pokaż cały kraj" title="Pokaż cały kraj" hidden>×</button>
+            <ul id="unit-list" class="stats-combo-list" role="listbox" aria-label="Obszary" hidden></ul>
+          </div>
+        </div>
       </form>
       <div class="stats-table-wrap">
         <table class="stats-table">
