@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::job_log::{self, JobRunLogEntry};
 use crate::server::AppState;
 use crate::server::jobs::JobStatus;
+use crate::server::public_config::PublicConfig;
 
 #[derive(Serialize, Default)]
 pub struct MatchStaleness {
@@ -239,6 +240,12 @@ fn duckdb_memory_or_default(state: &AppState) -> Option<crate::db_memory::DuckDb
 
 #[derive(Serialize)]
 pub struct StatusResponse {
+    /// The running binary's crate version -- the answer to "what is deployed
+    /// here", which nothing else in this response gives.
+    pub version: &'static str,
+    /// The settings a client needs in order to follow this server's limits
+    /// instead of guessing them. An allowlist -- see `server::public_config`.
+    pub config: PublicConfig,
     pub jobs: Vec<JobStatus>,
     pub match_staleness: MatchStaleness,
     pub job_run_log: BTreeMap<String, JobRunLogEntry>,
@@ -288,6 +295,7 @@ pub struct StatusResponse {
 
 pub async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
     let jobs = state.registry.snapshot();
+    let config = PublicConfig::from_config(&state.config);
     let tile_cache_hits = state.tile_cache.hits();
     let tile_cache_misses = state.tile_cache.misses();
     let tile_store_enabled = state.tile_store.enabled();
@@ -311,6 +319,8 @@ pub async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
         .await
         .unwrap_or_default();
     Json(StatusResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        config,
         jobs,
         match_staleness,
         job_run_log,

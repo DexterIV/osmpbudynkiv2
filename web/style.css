@@ -793,6 +793,11 @@ body {
   color: var(--ink-soft);
   font-size: 11px;
 }
+/* Carries a URL, which has no break opportunities of its own and would
+   otherwise widen the status panel past the viewport. */
+.status-source-hint {
+  overflow-wrap: anywhere;
+}
 
 .panel-download {
   right: 16px;

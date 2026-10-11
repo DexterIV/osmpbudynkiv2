@@ -465,9 +465,12 @@ impl Default for UpdatesConfig {
 pub struct ChangesConfig {
     /// Outer bound on the overlay's reach. The frontend picks its own,
     /// shorter window inside this one and evaluates it client-side, so this
-    /// must be at least as long as the longest window the frontend offers
+    /// should be at least as long as the longest window the frontend offers
     /// (`CHANGES_WINDOWS` in `web/app.js`, currently 7 d -- exactly this
-    /// value, so a longer preset there needs this raised first).
+    /// value, so a longer preset there needs this raised first). Set lower,
+    /// nothing goes blind: the value is published through
+    /// `server::public_config` and the frontend withdraws the presets it
+    /// exceeds.
     ///
     /// Beyond that floor, keep it tight rather than generous. Every z5..z11
     /// tile scans every change row inside this window nationwide -- that is
@@ -616,6 +619,8 @@ impl Default for JobsConfig {
 #[serde(default)]
 pub struct PackageConfig {
     /// Maximum allowed area of a /package request bounding box, in square degrees.
+    /// Published through `server::public_config`, which is where the frontend
+    /// gets its drawing limit.
     pub max_area_sq_deg: f64,
 }
 
@@ -638,7 +643,8 @@ impl Default for PackageConfig {
 pub struct ReportsConfig {
     /// Master switch. `false` makes `POST /report` a 404 without a redeploy --
     /// the operator's immediate answer to abuse, since nothing else throttles
-    /// the endpoint.
+    /// the endpoint. Published through `server::public_config` along with the
+    /// cap below, so the frontend removes its report controls when it is off.
     pub enabled: bool,
     /// Cap on objects per request. Bounds one request, not a sequence of them:
     /// its real job is to make a mis-drawn bulk selection cheap to recover from

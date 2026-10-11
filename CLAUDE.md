@@ -132,10 +132,14 @@ three files have to stay ordered.** `server::tiles::agg_bin_ctes` LEFT JOINs it
 into every z5–z11 tile as a per-bin, per-source `ts_*` timestamp, which the
 frontend compares against its own window. So: the longest window in
 `web/app.js`'s `CHANGES_WINDOWS` (7 d) ≤ `[changes] max_age_days` (7) ≤
-`[jobs.retention_prune] change_areas_days` (90). Violate either inequality and
-nothing errors — the overlay just goes blind for the tail of the window it
-still advertises. The first inequality is currently an **equality**: the "7 dni"
-preset sits exactly on `max_age_days`, which is the intended maximum, so
+`[jobs.retention_prune] change_areas_days` (90). Violate the second inequality
+and nothing errors — the overlay just goes blind for the tail of the window it
+still advertises. The first is now enforced at runtime instead:
+`max_age_days` is published in `/status` and `applyChangesMaxAge` hides any
+preset longer than it — but only once `/status` has answered, and never
+against a server too old to publish it. The first inequality is currently an
+**equality**: the "7 dni" preset sits exactly on `max_age_days`, which is the
+intended maximum, so
 *adding* a longer preset is a config change first — and one that costs every
 z5–z11 tile, per the next point, not just this overlay. The window is otherwise
 free: it is a paint-time comparison against a raw `ts_*` the tile already
@@ -1297,6 +1301,27 @@ static-asset middleware classifies purely on **response status**, not a filename
 list: a 404 is left header-less and inherits `no-store`, while anything `ServeDir`
 actually served — including its own `304` — gets at least `no-cache`, with
 `/fonts/` and `/vendor/` upgraded to a long `max-age`.
+
+**Gotcha — `/status` publishes a slice of the config, and it is an allowlist
+that must stay one.** `server::public_config::PublicConfig` is filled field by
+field from `Config`; `Config` itself deliberately does not derive `Serialize`.
+A "serialize everything but the secrets" shape would publish every field added
+later by default, and `Config` holds the TERYT API password, filesystem paths,
+the listen address and the backup directory. Three things:
+
+1. **`the_published_config_has_exactly_these_fields` pins the key set**, so
+   adding a field fails a test rather than happening as a side effect, and
+   `nothing_sensitive_reaches_the_published_config` checks by marker that no
+   secret-shaped setting leaks through whatever is published.
+2. **A URL goes through `public_url`**: http(s) only, userinfo, query and
+   fragment stripped, anything else (a `file://` URL, a bare path) withheld as
+   `null`. A secret in the *path* cannot be recognised and is published.
+3. **The frontend's own constants are fallbacks, not mirrors.**
+   `applyServerConfig` in `web/app.js` validates each value before it replaces
+   a default and leaves the default standing when one is missing, because the
+   frontend is deployed separately and can sit in front of an older server. A
+   new frontend use of a server limit belongs there, not in a new hardcoded
+   constant.
 
 **Gotcha — three tiers, two caches, and the tier boundary is not where it
 looks.** z12–z14 are *persisted* in RocksDB (`server::tile_store`), push-

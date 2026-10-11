@@ -2,6 +2,7 @@ mod http_cache;
 pub mod jobs;
 mod josm_plugins;
 mod package;
+mod public_config;
 mod reports;
 mod stats;
 mod tile_cache;
@@ -833,6 +834,11 @@ mod tests {
         assert_eq!(jobs[0]["state"], "idle");
         assert_eq!(jobs[0]["run_count"], 7);
         assert_eq!(jobs[0]["last_outcome"]["kind"], "Success");
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        // The frontend's limits come from here; the values themselves are
+        // pinned in `public_config`'s own tests.
+        assert_eq!(v["config"]["package"]["max_area_sq_deg"], 0.04);
+        assert_eq!(v["config"]["reports"]["enabled"], true);
         let mem = &v["duckdb_memory"];
         assert!(
             mem["memory_limit"].is_string(),

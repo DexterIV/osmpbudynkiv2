@@ -87,7 +87,9 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   // "7d" therefore sits exactly *on* that bound rather than under it, which
   // is the intended maximum (see ChangesConfig in src/config.rs) -- a longer
   // preset needs max_age_days raised first, and that costs every z5-z11
-  // tile, not just this overlay.
+  // tile, not just this overlay. A server configured with a *shorter* reach
+  // says so in /status, and the presets it cannot honour are withdrawn --
+  // see applyChangesMaxAge.
   //
   // `key` is what the URL hash and localStorage carry, so the keys are part
   // of a shared link's contract: renaming one silently drops the restored
@@ -448,7 +450,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   // for the vector-tile-style "filter a big source" approach the rest of
   // this file uses. Features carry a `kind` property (polygon/vertex/
   // rubberband) and, for polygons, `phase` (drawing/committed) and `valid`
-  // (false once the envelope exceeds MAX_AREA_SQ_DEG) -- separate layers key
+  // (false once the envelope exceeds maxAreaSqDeg) -- separate layers key
   // off those instead of feature-state, since the whole source is rebuilt on
   // every change anyway.
   //
@@ -1316,7 +1318,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
     // the key into a data- attribute instead would need an attribute-safe
     // escaper, and escapeHtml is not one -- it defers to innerHTML
     // serialization, which leaves quotes untouched.
-    const actionsHtml = report
+    const actionsHtml = report && reportsEnabled
       ? `<div class="feature-popup-actions">` +
         `<button type="button" class="report-btn">Zgłoś problem</button></div>`
       : "";
@@ -1408,6 +1410,13 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   // appDrawState is: both only ever run from a later user gesture.
   let popupReport = null;
 
+  // The server's [reports] enabled, as published in /status's `config` (see
+  // applyServerConfig). True until told otherwise: a /status that failed, or
+  // an older server that publishes no `config`, must not take reporting away
+  // -- POST /report stays authoritative either way and answers 404 when the
+  // feature is off, which the report modal's error state already shows.
+  let reportsEnabled = true;
+
   // The identity a report needs, per layer, because each MVT select projects a
   // different one (src/server/tiles.rs). BUILDINGS_MVT_SQL emits `source` +
   // `id` + `PRZESTRZENNAZW` -- the last NULL for egib, and ST_AsMVT drops NULL
@@ -1476,7 +1485,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   }
 
   // The objects the open dialog is about -- exactly one when it was opened
-  // from a feature popup, up to MAX_REPORT_OBJECTS when from a drawn-area
+  // from a feature popup, up to maxReportObjects when from a drawn-area
   // selection. Cleared on close so a target can never outlive the dialog
   // opening that set it.
   let reportTargets = [];
@@ -1849,6 +1858,62 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   function applyChangesWindowLabel() {
     const label = changesWindowEntry().label;
     if (changesWindowLabel && label) changesWindowLabel.textContent = label;
+  }
+
+  // How far back this server's tiles carry changes at all -- [changes]
+  // max_age_days, as published in /status's `config`. Infinity until the
+  // first /status answers (and for good against an older server that
+  // publishes no `config`), which offers every preset, as before.
+  let changesMaxAgeHours = Infinity;
+
+  function changesWindowOffered(key) {
+    const entry = CHANGES_WINDOWS.find((w) => w.key === key);
+    return Boolean(entry) && entry.hours <= changesMaxAgeHours;
+  }
+
+  // `remember` is false when the server, not the user, moved the window (see
+  // applyChangesMaxAge): the stored preference and the shared link's hash
+  // both keep naming what the user picked, so it comes back by itself once
+  // the server can honour it again.
+  function selectChangesWindow(key, { remember }) {
+    changesWindow = key;
+    legendChangesGroup.dataset.changesWindow = changesWindow;
+    for (const b of changesWindowButtons) {
+      b.setAttribute("aria-pressed", String(b.dataset.changesWindow === changesWindow));
+    }
+    applyChangesWindowLabel();
+    // Before the style has loaded there is nothing to apply to: wireLegend
+    // derives the layer's initial state from `changesWindow` when it runs.
+    if (mapLayersReady) {
+      // Order matters: the cutoff is what the overlay's paint expression
+      // reads, so re-stamp it before applying visibility -- otherwise the
+      // layer turns on for one frame still holding the previous window's
+      // cutoff.
+      stampChangesCutoff();
+      applyChangesVisibility();
+    }
+    if (remember) {
+      storeChangesWindow(changesWindow);
+      writeStateHash();
+    }
+  }
+
+  // A preset longer than the server's reach would light up nothing past the
+  // bound while still claiming the longer window, so it is withdrawn rather
+  // than left to mislead. "off" is 0 hours and so always offered, which is
+  // what guarantees the fallback below has something to pick.
+  function applyChangesMaxAge(days) {
+    const hours = days * 24;
+    if (hours === changesMaxAgeHours) return;
+    changesMaxAgeHours = hours;
+    for (const b of changesWindowButtons) {
+      b.hidden = !changesWindowOffered(b.dataset.changesWindow);
+    }
+    if (changesWindowOffered(changesWindow)) return;
+    const longest = CHANGES_WINDOWS.filter((w) => changesWindowOffered(w.key)).reduce((a, b) =>
+      b.hours > a.hours ? b : a
+    );
+    selectChangesWindow(longest.key, { remember: false });
   }
 
   // "off"/"bdot10k"/"egib" and "off"/"prg": one mutually-exclusive control per
@@ -2525,20 +2590,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
     }
     for (const btn of changesWindowButtons) {
       btn.addEventListener("click", () => {
-        changesWindow = btn.dataset.changesWindow;
-        legendChangesGroup.dataset.changesWindow = changesWindow;
-        for (const b of changesWindowButtons) {
-          b.setAttribute("aria-pressed", String(b === btn));
-        }
-        applyChangesWindowLabel();
-        // Order matters: the cutoff is what the overlay's paint expression
-        // reads, so re-stamp it before applying visibility -- otherwise the
-        // layer turns on for one frame still holding the previous window's
-        // cutoff.
-        stampChangesCutoff();
-        applyChangesVisibility();
-        storeChangesWindow(changesWindow);
-        writeStateHash();
+        selectChangesWindow(btn.dataset.changesWindow, { remember: true });
       });
     }
     // Layer visibility starts as "none" in the style spec above; derive the
@@ -2680,6 +2732,8 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   const statusTableBody = document.querySelector("#status-table tbody");
   const stalenessHint = document.getElementById("staleness-hint");
   const osmReplicationHint = document.getElementById("osm-replication-hint");
+  const osmReplicationSourceHint = document.getElementById("osm-replication-source-hint");
+  const serverVersionHint = document.getElementById("server-version-hint");
   const jobDetailsModal = document.getElementById("job-details-modal");
   const jobDetailsTitle = document.getElementById("job-details-title");
   const jobDetailsSummary = document.getElementById("job-details-summary");
@@ -2924,6 +2978,65 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
     } else {
       osmReplicationHint.textContent = "Stan zapisanych danych OSM: brak danych o sekwencji replikacji.";
     }
+
+    // Both absent from an older server's /status, and the URL is null when
+    // the configured feed is not a plain http(s) one (see public_url in
+    // src/server/public_config.rs) -- each line simply stays hidden then.
+    const replicationUrl = data.config && data.config.download_urls && data.config.download_urls.osm_replication;
+    osmReplicationSourceHint.hidden = !replicationUrl;
+    if (replicationUrl) osmReplicationSourceHint.textContent = `Źródło replikacji OSM: ${replicationUrl}`;
+    serverVersionHint.hidden = !data.version;
+    if (data.version) serverVersionHint.textContent = `Wersja serwera: ${data.version}`;
+  }
+
+  // /status's `config` is the handful of server settings this file would
+  // otherwise have to restate (see src/server/public_config.rs). Every value
+  // is checked before it replaces a default, and a missing one leaves the
+  // default standing, because the frontend is deployed separately from the
+  // binary and can find itself in front of a server older than it is.
+  //
+  // Runs on every poll, so it does nothing unless a value actually moved: in
+  // practice that is the first /status after page load, plus a server
+  // restarted with a different config under an open tab.
+  function applyServerConfig(config) {
+    if (!config) return;
+    const pkg = config.package || {};
+    const reports = config.reports || {};
+    const changes = config.changes || {};
+    let areaPanelStale = false;
+
+    if (Number.isFinite(pkg.max_area_sq_deg) && pkg.max_area_sq_deg >= 0 && pkg.max_area_sq_deg !== maxAreaSqDeg) {
+      maxAreaSqDeg = pkg.max_area_sq_deg;
+      areaPanelStale = true;
+    }
+    if (
+      Number.isInteger(reports.max_objects_per_request) &&
+      reports.max_objects_per_request >= 0 &&
+      reports.max_objects_per_request !== maxReportObjects
+    ) {
+      maxReportObjects = reports.max_objects_per_request;
+      areaPanelStale = true;
+    }
+    if (typeof reports.enabled === "boolean" && reports.enabled !== reportsEnabled) {
+      reportsEnabled = reports.enabled;
+      // The purpose picker is about to disappear, so a panel left on "Zgłoś"
+      // would have no way back. Same recompute as a click on the picker.
+      if (!reportsEnabled && areaPurpose === "report") {
+        areaPurpose = "download";
+        refreshReportSelection();
+      }
+      areaPanelStale = true;
+    }
+    if (areaPanelStale) {
+      // A committed polygon's valid/invalid colouring is judged by the limit
+      // that just moved. No polygon can exist before the style has loaded.
+      if (mapLayersReady) renderCommittedPolygon();
+      applyAreaPanelState();
+    }
+
+    if (Number.isFinite(changes.max_age_days) && changes.max_age_days >= 0) {
+      applyChangesMaxAge(changes.max_age_days);
+    }
   }
 
   function openJobDetails(job) {
@@ -2989,6 +3102,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
       const data = await res.json();
       statusDot.dataset.state = "idle";
       statusDot.title = SERVER_DOT_TITLES.idle;
+      applyServerConfig(data.config);
       renderStatus(data);
     } catch (err) {
       statusDot.dataset.state = "error";
@@ -3050,29 +3164,28 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
   const MIN_DOWNLOAD_ZOOM = 12;
   let downloadInFlight = false;
 
-  // Mirrors config.package.max_area_sq_deg's default (0.04, see
-  // check_area/RequestArea::bbox_area_sq_deg in src/server/package.rs) the
-  // same way MIN_DOWNLOAD_ZOOM above mirrors a server constraint -- this only
-  // avoids sending a request the server is guaranteed to reject; the server
-  // stays authoritative (a deployment with a different configured limit still
-  // 400s and that surfaces through the existing feedback modal, same as any
-  // other request error). Server-side the limit is the *envelope* area, not
-  // the polygon's true area (bbox_area_sq_deg), so that's what's mirrored
-  // here too -- a diagonal sliver polygon can have a huge envelope and a tiny
-  // true area, and the server would still reject it.
-  const MAX_AREA_SQ_DEG = 0.04;
+  // config.package.max_area_sq_deg (see check_area/
+  // RequestArea::bbox_area_sq_deg in src/server/package.rs). It only avoids
+  // sending a request the server is guaranteed to reject; the server stays
+  // authoritative, and a 400 still surfaces through the existing feedback
+  // modal like any other request error. Starts at the config's default and
+  // is replaced by the running server's value once /status answers (see
+  // applyServerConfig), so the default is what a failed /status, or an older
+  // server publishing no `config`, falls back to. Server-side the limit is
+  // the *envelope* area, not the polygon's true area (bbox_area_sq_deg), so
+  // that's what is compared here too -- a diagonal sliver polygon can have a
+  // huge envelope and a tiny true area, and the server would still reject it.
+  let maxAreaSqDeg = 0.04;
 
-  // Mirrors config.reports.max_objects_per_request (100 by default, see
-  // ReportsConfig in src/config.rs) exactly the way MAX_AREA_SQ_DEG above
-  // mirrors package.max_area_sq_deg: it only stops the frontend sending a
-  // request the server is guaranteed to reject with a 400, and the server
-  // stays authoritative -- a deployment that configured a different cap still
-  // rejects, and that surfaces through the report modal's existing error
-  // state. Deliberately not worked around by chunking a larger selection into
-  // several requests: the cap's stated job (see its comment in config.rs) is
-  // to make one mis-drawn bulk selection cheap to recover from, and a client
-  // that silently splits into batches gives that up.
-  const MAX_REPORT_OBJECTS = 100;
+  // config.reports.max_objects_per_request (see ReportsConfig in
+  // src/config.rs), default-then-/status exactly as maxAreaSqDeg above: it
+  // only stops the frontend sending a request the server is guaranteed to
+  // reject with a 400, and the server stays authoritative. Deliberately not
+  // worked around by chunking a larger selection into several requests: the
+  // cap's stated job (see its comment in config.rs) is to make one mis-drawn
+  // bulk selection cheap to recover from, and a client that silently splits
+  // into batches gives that up.
+  let maxReportObjects = 100;
 
   // buildings-unmatched-fill / addresses-unmatched-circle are both minzoom 14
   // (the vector source's own maxzoom, and the only tier carrying per-object
@@ -3117,13 +3230,13 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
 
   // The envelope-area cap is /package's alone (check_area in
   // src/server/package.rs). POST /report has no area limit of any kind; its
-  // bound is MAX_REPORT_OBJECTS on the object count, applied separately.
+  // bound is maxReportObjects on the object count, applied separately.
   function areaLimitApplies() {
     return areaPurpose === "download";
   }
 
   function polygonAreaValid(areaSqDeg) {
-    return !areaLimitApplies() || areaSqDeg <= MAX_AREA_SQ_DEG;
+    return !areaLimitApplies() || areaSqDeg <= maxAreaSqDeg;
   }
 
   // Last-used mode, remembered only for this page session (module-level, not
@@ -3837,8 +3950,8 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
         : "Zaznaczony obszar nie obejmuje niedopasowanych obiektów z włączonych warstw.";
     }
     let text = `Zaznaczono ${objectsPlural(count)} (${selectionCountsText()}).`;
-    if (count > MAX_REPORT_OBJECTS) {
-      text += ` Limit to ${MAX_REPORT_OBJECTS} obiektów na zgłoszenie — zmniejsz zaznaczony obszar.`;
+    if (count > maxReportObjects) {
+      text += ` Limit to ${objectsPlural(maxReportObjects)} na zgłoszenie — zmniejsz zaznaczony obszar.`;
     }
     if (reportSelectionStale) text += REPORT_STALE_HINT;
     return text;
@@ -3872,7 +3985,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
       // purpose -- see areaLimitApplies. Under the report purpose the bound
       // that matters is the object count, which cannot be known until the
       // polygon is committed and the selection computed.
-      text += areaLimitApplies() ? ` (limit ${areaText(MAX_AREA_SQ_DEG)}).` : ".";
+      text += areaLimitApplies() ? ` (limit ${areaText(maxAreaSqDeg)}).` : ".";
       if (!currentDrawValid) text += " Przekroczono limit powierzchni — zmniejsz obszar.";
     }
     drawHint.textContent = text;
@@ -3885,7 +3998,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
 
   function selectedHintText() {
     let text = `Powierzchnia obwiedni: ${areaText(committedAreaSqDeg)}`;
-    text += areaLimitApplies() ? ` (limit ${areaText(MAX_AREA_SQ_DEG)}).` : ".";
+    text += areaLimitApplies() ? ` (limit ${areaText(maxAreaSqDeg)}).` : ".";
     if (!polygonAreaValid(committedAreaSqDeg)) {
       text += " Przekroczono limit powierzchni — narysuj mniejszy obszar, aby pobrać.";
     }
@@ -3914,8 +4027,11 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
 
     // Hidden while drawing for the same reason the primary actions are:
     // switching purpose mid-gesture would re-judge the in-progress polygon
-    // against a different limit halfway through drawing it.
-    areaPurposePicker.hidden = drawing;
+    // against a different limit halfway through drawing it. And hidden
+    // outright when the server has reporting switched off, which leaves a
+    // picker with one purpose -- applyServerConfig has already moved
+    // areaPurpose back to "download" by then.
+    areaPurposePicker.hidden = drawing || !reportsEnabled;
     for (const btn of areaPurposeButtons) {
       btn.setAttribute("aria-pressed", String(btn.dataset.areaPurpose === areaPurpose));
       btn.disabled = downloadInFlight;
@@ -3951,8 +4067,8 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
       ? `Zgłoś zaznaczone obiekty (${selectionCount})`
       : "Zgłoś zaznaczone obiekty";
     // Over the cap the request is a guaranteed 400, so it is refused here
-    // rather than sent -- see MAX_REPORT_OBJECTS on why it is not chunked.
-    reportAreaBtn.disabled = selectionCount === 0 || selectionCount > MAX_REPORT_OBJECTS;
+    // rather than sent -- see maxReportObjects on why it is not chunked.
+    reportAreaBtn.disabled = selectionCount === 0 || selectionCount > maxReportObjects;
 
     reportSelectHint.hidden = !(reporting && selected);
     if (reporting && selected) reportSelectHint.textContent = reportSelectionHintText();
@@ -4002,7 +4118,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
     // Same two conditions the button's disabled state already carries,
     // repeated because a disabled button is a UI affordance rather than a
     // guarantee about what can reach this handler.
-    if (reportSelection.size === 0 || reportSelection.size > MAX_REPORT_OBJECTS) return;
+    if (reportSelection.size === 0 || reportSelection.size > maxReportObjects) return;
     openReportModal([...reportSelection.values()], { fromSelection: true });
   });
 
@@ -4037,7 +4153,7 @@ import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
 
   // The OSM API refuses a download whose bbox exceeds 0.25 square degrees, so
   // JOSM rejects /load_and_zoom before it ever reaches the network. Mirrored
-  // here for exactly the reason MAX_AREA_SQ_DEG mirrors /package's own cap:
+  // here for exactly the reason maxAreaSqDeg follows /package's own cap:
   // only to avoid firing a request that is guaranteed to fail, with the far
   // side staying authoritative -- an area JOSM refuses for some other reason
   // (its 50k-node ceiling, which is not an area at all) still surfaces

@@ -202,8 +202,10 @@
          rather than sources: the tile carries one raw timestamp per source
          per bin and the window is a client-side comparison against it (see
          CHANGES_WINDOWS in app.js), so switching between them costs no
-         refetch. "7 dni" is the longest option the server can honour -- the
-         tile never carries anything older than [changes] max_age_days. -->
+         refetch. "7 dni" is the longest option the server can honour by
+         default -- the tile never carries anything older than [changes]
+         max_age_days, and app.js's applyChangesMaxAge hides any button here
+         that a server configured with a shorter reach cannot back. -->
     <div class="legend-group" data-changes-window="24h">
       <div class="legend-group-header">
         <span class="legend-title">Ostatnio zaktualizowane</span>
@@ -309,7 +311,7 @@
     <button id="draw-clear-btn" type="button" class="download-btn" hidden>Usuń zaznaczenie</button>
     <!-- Report purpose only, once a polygon is committed. Label carries the
          live count (see applyAreaPanelState); disabled when the count is 0 or
-         over MAX_REPORT_OBJECTS. -->
+         over maxReportObjects. -->
     <button id="report-area-btn" type="button" class="download-btn report-area-btn" hidden>Zgłoś zaznaczone obiekty</button>
 
     <p id="download-zoom-hint" class="hint" hidden>Przybliż mapę (zoom 12+), aby pobrać paczkę z widocznego obszaru.</p>
@@ -488,6 +490,10 @@
       </div>
       <p class="hint" id="staleness-hint"></p>
       <p class="hint" id="osm-replication-hint"></p>
+      <!-- Both filled from /status by renderStatus in app.js, and left hidden
+           when the server does not publish the value. -->
+      <p class="hint status-source-hint" id="osm-replication-source-hint" hidden></p>
+      <p class="hint" id="server-version-hint" hidden></p>
     </div>
   </section>
 

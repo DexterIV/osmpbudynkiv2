@@ -131,6 +131,10 @@ osm_pbf = "https://download.openstreetmap.fr/extracts/europe/poland-latest.osm.p
 bdot10k = "https://opendata.geoportal.gov.pl/bdot10k/schemat2021/GeoParquet/OT_BUBD_A.parquet"
 egib = "https://opendata.geoportal.gov.pl/InneDane/latest_exports/eziudp_wfs/PARQUET/0_budynki.parquet"
 prg = "https://integracja.gugik.gov.pl/PRG/pobierz.php?adresy_zbiorcze_gml"
+# Published in GET /status (config.download_urls.osm_replication) so a user can
+# see which feed the data follows. Userinfo and the query string are stripped
+# first, and a value that is not an http(s) URL is not published at all -- but
+# a secret carried in the *path* cannot be recognised and would be exposed.
 osm_replication = "https://download.openstreetmap.fr/replication/europe/poland/minute"
 # Curated PRG -> OSM street name mappings (see mappings/street_names_mappings.csv).
 # Used by `import street-mappings` when no --file is given, and by the
@@ -380,6 +384,7 @@ run_on_start = false
 [package]
 # Maximum allowed area of a request's bounding box, in square degrees.
 # 0.04 = 0.2° x 0.2° which is roughly 14 x 22 km in Poland.
+# Published in GET /status; the frontend reads its drawing limit from there.
 max_area_sq_deg = 0.04
 
 # POST /report endpoint -- users marking a government object as one that should
@@ -400,6 +405,8 @@ max_area_sq_deg = 0.04
 # them up with `reports export`.
 [reports]
 # Master switch. false makes POST /report a 404 with no redeploy needed.
+# Published in GET /status, as is the cap below: the frontend removes its
+# report controls when this is false.
 enabled = true
 # Cap on objects per request. Bounds one request, not a sequence of them: its
 # real job is to make a mis-drawn bulk selection cheap to recover from.
@@ -418,9 +425,11 @@ max_minutes = 1440
 # one and evaluates it client-side, so switching between "last 24 h" and
 # "last 7 d" costs no refetch.
 [changes]
-# Outer bound on how far back a tile may look. Must be at least as long as the
-# longest window the frontend offers (CHANGES_WINDOWS in web/app.js, whose
-# longest preset is 7 d -- exactly this value).
+# Outer bound on how far back a tile may look. Should be at least as long as
+# the longest window the frontend offers (CHANGES_WINDOWS in web/app.js, whose
+# longest preset is 7 d -- exactly this value). Published in GET /status: set
+# lower, the frontend withdraws the presets it can no longer back instead of
+# showing a window the tiles do not carry.
 #
 # Beyond that floor, keep it tight rather than generous: every z5-z11 tile
 # scans every change row inside this window nationwide -- the table has no
