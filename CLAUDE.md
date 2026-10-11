@@ -1014,10 +1014,30 @@ twice per drained cell. Both now wrap the source scan in a `candidates` CTE via 
    *real* generated SQL — `rule.rs`'s own index test cannot catch this, because it
    asserts before the guard is appended.
 4. **Do not apply this to the full compare.** The full paths have a structurally
-   identical guard over a 0.5° grid, and the same wrap measured **worse**
-   (0.955 s → 1.097 s). A 0.5° cell is ~1/264 of the table — not selective enough
-   for an RTREE walk to beat a sequential scan — whereas a z14 cell is
-   ~1/340,000. Both full paths *want* their sequential scan.
+   identical guard over a coarse grid, and the same wrap measured **worse** at
+   every cell size tried: fetching a row through the RTREE costs ~54 µs of CPU
+   regardless of the cell, because the tables are not spatially clustered on
+   disk, so a grid cell holding a real fraction of the table loses to one
+   sequential scan — whereas a z14 cell is ~1/340,000 of it. Both full paths
+   *want* their sequential scan. The consequence runs the other way from
+   intuition: since every cell pays one full table scan (~0.6 s) whatever it
+   holds, the building grid's `GRID_STEP` is **2°, and larger is faster** —
+   0.5° → 2° took bdot10k from 4m 20s to 1m 42s. Memory is what bounds it; the
+   measurements and the two benchmarking traps that each produced a confident
+   wrong answer (a pruned stand-in projection, and the debug binary's ~2.7×
+   per-cell penalty) are on the constant in `compare::buildings`.
+
+**Gotcha — a correlated `NOT EXISTS` over a CTE that aggregates is a
+`DELIM_JOIN`, and at national scale that is a memory bill, not a style
+choice.** `compare::addresses::build_sql` removes the matched ids with an
+explicit `ANTI JOIN matched_ids`, because `matched_ids` is a `SELECT DISTINCT`
+and DuckDB does not flatten `NOT EXISTS (SELECT 1 FROM matched_ids ...)` over
+it: it materializes every `prg_addresses` row with all projected columns
+first. Identical rows either way; ~5 GB of working memory against ~2.5 GB,
+and the `NOT EXISTS` form fails outright at a 3 GB limit. On production that
+one statement took 1h 3m 53s while the building compares took minutes. Pinned by
+`addresses::tests::the_matched_ids_are_removed_by_a_plain_anti_join`, which
+carries its own negative control — no functional test can see the difference.
 
 **Gotcha — the `tiles` column family is the one that opts out of everything
 the others do.** It holds rendered z12–z14 `/tiles` bodies

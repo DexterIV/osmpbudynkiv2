@@ -21,33 +21,46 @@ use crate::utils::format_duration;
 /// the centroid RTREE out of the plan, and the scan is what the full compare
 /// wants anyway (see the per-cell-recompute gotcha in `CLAUDE.md`). So the
 /// cost of finding a cell's rows is `cells x one table scan`, independent of
-/// what the cell holds. At 0.5° that was 252 scans and ~65% of all CPU, with
-/// 52 of the cells writing no row at all. Measured on the national bdot10k
-/// table at a 4 GB `memory_limit`, same rule text:
+/// what the cell holds: ~0.6 s of wall time per cell on the national bdot10k
+/// table, empty cells included. At 0.5° that was 252 scans and ~65% of all
+/// CPU, with 52 of the cells writing no row at all. Measured with the release
+/// binary's real `compare buildings` on the national tables, 8 threads -- the
+/// grid loop alone, with the whole source's elapsed time in parentheses:
 ///
-/// | step | cells | wall  |
-/// |------|-------|-------|
-/// | 0.5° | 252   | 255 s |
-/// | 1°   | 66    | 130 s |
-/// | 2°   | 18    | 86 s  |
+/// | step | cells | bdot10k @ 6.5 GB  | bdot10k @ 4 GB    | egib @ 6.5 GB |
+/// |------|-------|-------------------|-------------------|---------------|
+/// | 0.5° | 252   | 3m 59s (4m 20s)   | 4m 06s (4m 36s)   | (5m 03s)      |
+/// | 1°   | 66    | 2m 02s (2m 18s)   | —                 | —             |
+/// | 2°   | 24    | 1m 27s (1m 42s)   | 1m 42s (3m 10s)   | 1m 33s (2m 13s) |
 ///
 /// **A smaller step does not buy the index back.** The RTREE only appears if
 /// the source scan is wrapped in a `candidates` CTE, and then fetching a row
 /// through it costs ~54 µs of CPU whatever the cell size -- the tables are not
 /// spatially clustered on disk, so every fetch is effectively random. Over one
-/// 2°x2° block: 26.4 s at 0.5°, 29.1 s at 0.25°, 45.8 s at 0.125°, against
-/// 10.6 s for the single sequential-scan cell.
+/// 2°x2° block that shape took 26.4 s at 0.5°, 29.1 s at 0.25° and 45.8 s at
+/// 0.125°: constant CPU, falling parallelism.
 ///
 /// What bounds it from above is memory: the anti-join's `DELIM_JOIN`
-/// materializes the cell's `b.geom`, and the `SPATIAL_JOIN` builds over the
-/// cell's `osm_buildings`. The densest 2° cell holds ~1.9M source rows and
-/// ran without spilling at 4 GB.
+/// materializes every projected column of the cell's source rows, and the
+/// `SPATIAL_JOIN` builds over the cell's `osm_buildings`. At 2° the densest
+/// cell (18–20°E, 50–52°N, ~12 s) holds 2.7M bdot10k / 3.0M egib rows; peak
+/// RSS stayed within ~0.4 GB of `memory_limit` at both 4 GB and 6.5 GB, for
+/// both sources. Nothing larger was measured.
+///
+/// **Measure a change here with the release binary and the real statement, or
+/// not at all.** Both shortcuts gave a confident wrong answer for this
+/// constant: a stand-in `INSERT` projecting only the id columns lets DuckDB
+/// prune the carried columns out of the `DELIM_JOIN` and understates memory;
+/// and the *debug* binary pays ~2.7x per cell (1.66 s against 0.60 s for an
+/// empty cell, with DuckDB itself compiled identically in both profiles),
+/// which makes a small step look far worse and a large one far better than
+/// they are.
 ///
 /// The step is also, very slightly, a *result* input: `osm_buildings` is
 /// filtered by the cell envelope, so a government building whose only covering
 /// OSM building lies wholly in the neighbouring cell reads as unmatched.
 /// Fewer cell edges mean fewer of those (485,314 unmatched bdot10k rows at
-/// 0.5°, 485,310 at 2°).
+/// 0.5°, 485,311 at 1°, 485,310 at 2°).
 const GRID_STEP: f64 = 2.0;
 
 pub fn compare_bdot10k(conn: &Connection) -> Result<()> {
@@ -169,6 +182,7 @@ fn compare_buildings_with_cancel(
                 // boundary row is written by exactly the cell that owns it (the
                 // z14 analogue of this guard lives in
                 // incremental::recompute_cell_in_txn).
+                let cell_started = std::time::Instant::now();
                 conn.execute_batch(&format!(
                     "INSERT INTO {dest} ({id_col}, geom, cell_x, cell_y, computed_at, {})
                      {inner}
@@ -177,16 +191,29 @@ fn compare_buildings_with_cancel(
                     cc.dest_names
                 ))
                 .with_context(|| format!("Failed comparing {label} in cell ({x},{y})"))?;
+                // Per-cell timing at debug level: the grid is nearly all of a
+                // building compare's wall time, and without this the only
+                // number an operator has is the total.
+                tracing::debug!(
+                    source = label,
+                    x,
+                    y,
+                    elapsed_ms = cell_started.elapsed().as_millis() as u64,
+                    "grid cell compared"
+                );
                 x += GRID_STEP;
             }
             y += GRID_STEP;
         }
+        tracing::debug!(source = label, elapsed = %format_duration(t.elapsed()), "grid loop done");
         // Inside the same transaction as the rows it counts, so a cell's
         // numerator and denominator always come from one comparison.
         totals::rebuild_all_in_txn(conn, label)
             .with_context(|| format!("Failed to rebuild cell totals for {label}"))?;
+        tracing::debug!(source = label, elapsed = %format_duration(t.elapsed()), "cell totals rebuilt");
         Ok(extent)
     })?;
+    tracing::debug!(source = label, elapsed = %format_duration(t.elapsed()), "committed");
 
     // total is now accurate: the grid above covers the source table's full
     // extent (source_grid_extent), and the write-narrow guard means each row
@@ -295,13 +322,19 @@ fn source_grid_extent(
     grid_step: f64,
 ) -> Result<(f64, f64, f64, f64)> {
     const FALLBACK: (f64, f64, f64, f64) = (14.0, 49.0, 25.0, 55.0);
-    /// ~8× the Poland grid (6 × 4 = 24 cells at `GRID_STEP` = 2°) — generous
+    /// How many times the historical Poland grid the cap allows — generous
     /// enough for a stray row a few degrees outside the country, far short of
-    /// the blow-up a wild coordinate causes. Scaled with `GRID_STEP`, not left
-    /// at the 2048 it was for a 0.5° step: every cell costs a full scan of the
-    /// source table whether or not it holds anything, so the cap is a bound on
-    /// wasted scans and has to stay a small multiple of the real grid.
-    const MAX_GRID_CELLS: f64 = 192.0;
+    /// the blow-up a wild coordinate causes.
+    const MAX_GRID_MULTIPLE: f64 = 8.0;
+    // Derived from `grid_step` rather than written as a cell count: every cell
+    // costs a full scan of the source table whether or not it holds anything,
+    // so the cap is a bound on wasted scans and has to stay a small multiple
+    // of the real grid at whatever step is in use. A literal would have to be
+    // rescaled by hand on every step change, and forgetting only ever loosens
+    // it.
+    let (fx1, fy1, fx2, fy2) = FALLBACK;
+    let max_grid_cells =
+        MAX_GRID_MULTIPLE * ((fx2 - fx1) / grid_step).ceil() * ((fy2 - fy1) / grid_step).ceil();
 
     let row: (Option<f64>, Option<f64>, Option<f64>, Option<f64>) = conn.query_row(
         &format!(
@@ -330,10 +363,10 @@ fn source_grid_extent(
         );
     }
     let cells = ((x2 - x1) / grid_step) * ((y2 - y1) / grid_step);
-    if cells > MAX_GRID_CELLS {
+    if cells > max_grid_cells {
         anyhow::bail!(
             "{source_table} spans ({x1},{y1},{x2},{y2}) — {cells:.0} grid cells at \
-             {grid_step}°, over the {MAX_GRID_CELLS:.0}-cell cap. A coordinate far \
+             {grid_step}°, over the {max_grid_cells:.0}-cell cap. A coordinate far \
              outside Poland is almost certainly bad source data; find and fix that row \
              (its centroid is at one of the extent corners) before comparing."
         );
