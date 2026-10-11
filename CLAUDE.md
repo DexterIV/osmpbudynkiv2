@@ -1620,6 +1620,67 @@ override it, include everything you need (spatial extension, memory limits, etc.
   done` loops). An isolated run rarely reproduces contention-dependent races: the
   shared `download_runtime`/`download_client` statics and real OS thread scheduling
   only get stressed when sibling tests genuinely compete for CPU in the same process.
+- **Gotcha — always run a benchmark inside a memory- and CPU-capped cgroup.**
+  Anything that runs `compare`, `import`, `update` or a profiling query against
+  the national tables goes through `systemd-run`, never bare:
+
+  ```bash
+  systemd-run --user --scope -q \
+      -p MemoryMax=12G -p MemorySwapMax=0 -p CPUQuota=400% \
+      ./target/release/osmpbudynkiv2 --config <scratch config> compare buildings
+  ```
+
+  **The limits are the production server's, not this machine's**, so a number
+  measured here is one production could plausibly see. Read off the host on
+  2026-10-11: 4 vCPUs (`CPUQuota=400%`), 14.9 GiB RAM with 12 GiB of swap, and
+  `MemoryMax=12G` on the service unit (no `MemoryHigh`, no CPU quota). The
+  scratch config has to carry the other half — production's DuckDB settings,
+  which are not this repo's defaults:
+
+  ```toml
+  "SET GLOBAL memory_limit = '6.5GB'",          # default here: 4GB
+  "SET GLOBAL threads = 3",                     # default here: 8
+  "SET GLOBAL max_temp_directory_size = '12GB'", # default here: 8GB
+  ```
+
+  Capping the cgroup at 400% while leaving `threads = 8` is not the same
+  thing: eight threads throttled to four cores measure contention, not a
+  four-core machine. When the values drift, re-read them rather than trusting
+  this paragraph: `nproc`, the `SET GLOBAL` lines of the deployed
+  `config.toml`, and `systemctl show osmpbudynkiv2 -p MemoryMax -p MemoryHigh
+  -p MemorySwapMax`.
+
+  The cap is also what keeps the desktop alive. An uncapped run on a machine
+  that was already swapping pushed the whole session into reclaim on
+  2026-10-11: no OOM kill, just an unresponsive desktop and a forced reboot
+  that took the scratch directory with it. Four things:
+
+  1. **`MemoryMax` must stay well above `memory_limit`.** DuckDB's limit
+     governs its buffer pool, not the process: RSS runs ~0.4 GB over it, and
+     the cap also counts the page cache the run touches — which is what makes
+     the cgroup reclaim *its own* cache instead of evicting the desktop's.
+     Note a `compare` run by hand on the server is not inside the unit, so
+     there the 12G is a stand-in for "what a 14.9 GiB shared host can spare".
+  2. **`MemorySwapMax=0` is the default, and the one deliberate departure from
+     production.** With it, a run that outgrows the cap is killed, alone;
+     without it the run swaps into zram and keeps "making progress" for
+     minutes. Production does swap (7.6 of its 12 GiB were in use when these
+     values were read), so to reproduce *that* — a phase that takes an hour
+     there and seconds here — pass `-p MemorySwapMax=12G` instead, knowingly.
+  3. **The cap skews multi-phase timings.** Later phases find the cgroup's
+     cache full of the earlier phases' pages and re-read from disk (the address
+     phase measured 31 s at the end of a capped `compare full`, 10.4 s on its
+     own). Time each phase in its own scope.
+  4. **Keep scratch off the root disk.** A database copy and DuckDB's
+     `temp_directory` under `/tmp` put the benchmark's I/O on the same SSD every
+     other program pages its code back in from. Use a directory on
+     `/mnt/nvme` (or wherever the real database lives).
+
+  And the two measurement rules that go with it, each of which produced a
+  confident wrong answer for `compare::buildings::GRID_STEP`: **the release
+  binary only** (the debug binary is ~2.7× slower per grid cell although
+  DuckDB is compiled identically in both), and **the real statement only** (a
+  stand-in projection lets DuckDB prune columns and understates memory).
 
 ## Web frontend (`web/`) & browser testing
 
