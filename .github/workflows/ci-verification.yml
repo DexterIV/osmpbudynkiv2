@@ -1,0 +1,52 @@
+name: CI (verification only)
+
+# This name is deliberately "verification only": this workflow is not part of
+# the changes the repo is expected to accept. It carries a CORS fix on a
+# branch in a fork that has no Rust toolchain available locally, and exists
+# purely so that branch is proven to build and pass tests before a pull
+# request is opened. If the PR is accepted, this file should not come with it.
+
+on:
+  push:
+    branches: [fix/cors-ci]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt-build-test:
+    name: cargo fmt, build & test (release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v7
+
+    # Same reasons as release.yml: libduckdb-sys wants Ninja, rust-rocksdb's
+    # bindgen dlopens libclang.so.
+    - name: Install build tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ninja-build clang libclang-dev
+
+    # Toolchain comes from rust-toolchain.toml, which big runners' preinstalled
+    # rustup honors automatically; nothing pinned is restated here.
+    - name: Show toolchain
+      run: |
+        rustc --version
+        cargo --version
+
+    - name: Cache Rust build
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Run tests
+      run: cargo test --locked --release
